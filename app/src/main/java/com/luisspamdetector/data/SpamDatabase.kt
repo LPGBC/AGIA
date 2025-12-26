@@ -32,6 +32,25 @@ data class CallHistoryEntity(
 )
 
 /**
+ * Entidad para almacenar historial de screenings con grabaciones y transcripciones
+ */
+@Entity(tableName = "screening_history")
+data class ScreeningHistoryEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val phoneNumber: String,
+    val callerName: String?,
+    val callerPurpose: String?,
+    val transcription: String?,
+    val recordingPath: String?,
+    val duration: Int = 0, // duración en segundos
+    val wasAccepted: Boolean = false,
+    val isSpam: Boolean = false,
+    val spamConfidence: Double = 0.0,
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+/**
  * DAO para operaciones de spam checks
  */
 @Dao
@@ -89,16 +108,53 @@ interface CallHistoryDao {
 }
 
 /**
+ * DAO para operaciones de historial de screenings
+ */
+@Dao
+interface ScreeningHistoryDao {
+    @Query("SELECT * FROM screening_history ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecent(limit: Int = 100): List<ScreeningHistoryEntity>
+
+    @Query("SELECT * FROM screening_history WHERE id = :id")
+    suspend fun getById(id: Long): ScreeningHistoryEntity?
+
+    @Insert
+    suspend fun insert(screening: ScreeningHistoryEntity): Long
+
+    @Update
+    suspend fun update(screening: ScreeningHistoryEntity)
+
+    @Query("DELETE FROM screening_history WHERE id = :id")
+    suspend fun delete(id: Long)
+
+    @Query("DELETE FROM screening_history WHERE timestamp < :olderThan")
+    suspend fun deleteOlderThan(olderThan: Long)
+
+    @Query("SELECT COUNT(*) FROM screening_history")
+    suspend fun getCount(): Int
+
+    @Query("SELECT COUNT(*) FROM screening_history WHERE isSpam = 1")
+    suspend fun getSpamCount(): Int
+
+    @Query("SELECT * FROM screening_history WHERE phoneNumber = :phoneNumber ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getLatestByPhoneNumber(phoneNumber: String): ScreeningHistoryEntity?
+
+    @Query("DELETE FROM screening_history")
+    suspend fun deleteAll()
+}
+
+/**
  * Base de datos Room principal
  */
 @Database(
-    entities = [SpamCheckEntity::class, CallHistoryEntity::class],
-    version = 2,
+    entities = [SpamCheckEntity::class, CallHistoryEntity::class, ScreeningHistoryEntity::class],
+    version = 3,
     exportSchema = false
 )
 abstract class SpamDatabase : RoomDatabase() {
     abstract fun spamCheckDao(): SpamCheckDao
     abstract fun callHistoryDao(): CallHistoryDao
+    abstract fun screeningHistoryDao(): ScreeningHistoryDao
 
     companion object {
         @Volatile
@@ -211,3 +267,67 @@ data class CallStats(
     val spamCalls: Int,
     val rejectedCalls: Int
 )
+
+/**
+ * Repositorio para historial de screenings
+ */
+class ScreeningHistoryRepository(private val screeningHistoryDao: ScreeningHistoryDao) {
+
+    suspend fun addScreening(
+        phoneNumber: String,
+        callerName: String?,
+        callerPurpose: String?,
+        transcription: String?,
+        recordingPath: String?,
+        duration: Int = 0,
+        wasAccepted: Boolean = false,
+        isSpam: Boolean = false,
+        spamConfidence: Double = 0.0
+    ): Long {
+        val entity = ScreeningHistoryEntity(
+            phoneNumber = phoneNumber,
+            callerName = callerName,
+            callerPurpose = callerPurpose,
+            transcription = transcription,
+            recordingPath = recordingPath,
+            duration = duration,
+            wasAccepted = wasAccepted,
+            isSpam = isSpam,
+            spamConfidence = spamConfidence
+        )
+        return screeningHistoryDao.insert(entity)
+    }
+
+    suspend fun getRecentScreenings(limit: Int = 100): List<ScreeningHistoryEntity> {
+        return screeningHistoryDao.getRecent(limit)
+    }
+
+    suspend fun getScreeningById(id: Long): ScreeningHistoryEntity? {
+        return screeningHistoryDao.getById(id)
+    }
+
+    suspend fun updateScreening(screening: ScreeningHistoryEntity) {
+        screeningHistoryDao.update(screening)
+    }
+
+    suspend fun deleteScreening(id: Long) {
+        screeningHistoryDao.delete(id)
+    }
+
+    suspend fun getScreeningCount(): Int {
+        return screeningHistoryDao.getCount()
+    }
+
+    suspend fun getSpamScreeningCount(): Int {
+        return screeningHistoryDao.getSpamCount()
+    }
+
+    suspend fun clearHistory() {
+        screeningHistoryDao.deleteAll()
+    }
+
+    suspend fun clearOldHistory(daysToKeep: Int = 30) {
+        val cutoff = System.currentTimeMillis() - (daysToKeep * 24 * 60 * 60 * 1000L)
+        screeningHistoryDao.deleteOlderThan(cutoff)
+    }
+}

@@ -12,6 +12,7 @@ import com.luisspamdetector.api.GeminiApiService
 import com.luisspamdetector.data.SpamCheckEntity
 import com.luisspamdetector.data.SpamDatabase
 import com.luisspamdetector.data.SpamRepository
+import com.luisspamdetector.data.ScreeningHistoryRepository
 import com.luisspamdetector.ui.IncomingCallActivity
 import com.luisspamdetector.ui.ScreeningOverlayActivity
 import com.luisspamdetector.util.ContactsHelper
@@ -46,6 +47,7 @@ class LinphoneService : Service() {
     private lateinit var geminiService: GeminiApiService
     private lateinit var contactsHelper: ContactsHelper
     private lateinit var spamRepository: SpamRepository
+    private lateinit var screeningHistoryRepository: ScreeningHistoryRepository
     private var callScreeningService: CallScreeningService? = null
     
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -98,6 +100,7 @@ class LinphoneService : Service() {
         
         val database = SpamDatabase.getDatabase(this)
         spamRepository = SpamRepository(database.spamCheckDao())
+        screeningHistoryRepository = ScreeningHistoryRepository(database.screeningHistoryDao())
         
         // Inicializar call screening si hay API key
         if (apiKey.isNotEmpty()) {
@@ -552,47 +555,77 @@ class LinphoneService : Service() {
         try {
             Logger.i(TAG, "Transcribiendo grabación: $recordingPath")
             
-            // Por ahora, guardamos la información sin transcripción completa
-            // La transcripción del audio requiere un servicio de STT offline o API
-            // Usamos Gemini para resumir lo que sabemos
-            
-            val transcriptionSummary = withContext(Dispatchers.IO) {
+            // Analizar si es spam usando Gemini
+            val (transcriptionSummary, isSpam, spamConfidence) = withContext(Dispatchers.IO) {
                 try {
                     val prompt = """
-                        Genera un resumen breve de esta llamada filtrada:
+                        Analiza esta llamada filtrada y responde en formato JSON:
                         - Número: $phoneNumber
                         - Nombre del llamante: ${name ?: "Desconocido"}
                         - Motivo declarado: ${purpose ?: "No especificado"}
                         
-                        Indica si parece spam/telemarketing o una llamada legítima.
-                        Responde en máximo 2 frases.
+                        Responde SOLO con este JSON (sin markdown):
+                        {"resumen": "resumen breve de la llamada", "es_spam": true/false, "confianza": 0.0-1.0}
                     """.trimIndent()
-                    geminiService.askGemini(prompt)
+                    val response = geminiService.askGemini(prompt)
+                    
+                    // Parsear respuesta JSON
+                    try {
+                        val jsonMatch = Regex("""\{[^}]+\}""").find(response)
+                        if (jsonMatch != null) {
+                            val json = org.json.JSONObject(jsonMatch.value)
+                            Triple(
+                                json.optString("resumen", "Llamada de ${name ?: "desconocido"}"),
+                                json.optBoolean("es_spam", false),
+                                json.optDouble("confianza", 0.5)
+                            )
+                        } else {
+                            Triple(response.take(200), false, 0.5)
+                        }
+                    } catch (e: Exception) {
+                        Triple(response.take(200), false, 0.5)
+                    }
                 } catch (e: Exception) {
-                    Logger.e(TAG, "Error al resumir con Gemini", e)
-                    "Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}"
+                    Logger.e(TAG, "Error al analizar con Gemini", e)
+                    Triple("Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}", false, 0.0)
                 }
             }
             
-            // Guardar en la base de datos
-            val screeningEntity = SpamCheckEntity(
-                phoneNumber = phoneNumber,
-                isSpam = false, // Se puede determinar con análisis
-                confidence = 0.5,
-                reason = "Screening: $transcriptionSummary",
-                timestamp = System.currentTimeMillis()
-            )
-            spamRepository.insertCheck(screeningEntity)
+            // Calcular duración del archivo de audio (aproximado)
+            val duration = try {
+                val file = java.io.File(recordingPath)
+                if (file.exists()) {
+                    // WAV: tamaño / (sample_rate * channels * bits/8)
+                    // Aproximación: 16kHz, mono, 16bit = 32000 bytes/segundo
+                    (file.length() / 32000).toInt()
+                } else 0
+            } catch (e: Exception) { 0 }
             
-            Logger.i(TAG, "Transcripción guardada: $transcriptionSummary")
+            // Guardar en el historial de screenings
+            val screeningId = screeningHistoryRepository.addScreening(
+                phoneNumber = phoneNumber,
+                callerName = name,
+                callerPurpose = purpose,
+                transcription = transcriptionSummary,
+                recordingPath = recordingPath,
+                duration = duration,
+                wasAccepted = false,
+                isSpam = isSpam,
+                spamConfidence = spamConfidence
+            )
+            
+            Logger.i(TAG, "Screening guardado con ID: $screeningId - Spam: $isSpam ($spamConfidence)")
             
             // Notificar que hay nueva transcripción
             val intent = Intent("com.luisspamdetector.TRANSCRIPTION_READY").apply {
+                putExtra("screening_id", screeningId)
                 putExtra("phone_number", phoneNumber)
                 putExtra("transcription", transcriptionSummary)
                 putExtra("recording_path", recordingPath)
                 putExtra("caller_name", name)
                 putExtra("caller_purpose", purpose)
+                putExtra("is_spam", isSpam)
+                putExtra("spam_confidence", spamConfidence)
             }
             sendBroadcast(intent)
             

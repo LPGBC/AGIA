@@ -2,6 +2,7 @@ package com.luisspamdetector
 
 import android.content.Context
 import android.content.Intent
+import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
@@ -12,6 +13,8 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,14 +35,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.luisspamdetector.data.ScreeningHistoryEntity
+import com.luisspamdetector.data.ScreeningHistoryRepository
+import com.luisspamdetector.data.SpamDatabase
 import com.luisspamdetector.service.LinphoneService
 import com.luisspamdetector.ui.theme.LinphoneSpamDetectorTheme
 import com.luisspamdetector.util.Logger
 import com.luisspamdetector.util.PermissionsHelper
 import kotlinx.coroutines.*
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
@@ -187,12 +197,18 @@ fun MainScreen(
                     Tab(
                         selected = selectedTab == 1,
                         onClick = { selectedTab = 1 },
-                        text = { Text("SIP") },
-                        icon = { Icon(Icons.Default.Phone, contentDescription = null) }
+                        text = { Text("Historial") },
+                        icon = { Icon(Icons.Default.History, contentDescription = null) }
                     )
                     Tab(
                         selected = selectedTab == 2,
                         onClick = { selectedTab = 2 },
+                        text = { Text("SIP") },
+                        icon = { Icon(Icons.Default.Phone, contentDescription = null) }
+                    )
+                    Tab(
+                        selected = selectedTab == 3,
+                        onClick = { selectedTab = 3 },
                         text = { Text("Logs") },
                         icon = { Icon(Icons.Default.Description, contentDescription = null) }
                     )
@@ -265,7 +281,8 @@ fun MainScreen(
                 onRequestOverlay = onRequestOverlayPermission,
                 onRequestBattery = onRequestBatteryOptimization
             )
-            1 -> SipConfigTab(
+            1 -> HistoryTab(paddingValues = paddingValues)
+            2 -> SipConfigTab(
                 paddingValues = paddingValues,
                 sipUsername = sipUsername,
                 sipPassword = sipPassword,
@@ -326,7 +343,7 @@ fun MainScreen(
                     Toast.makeText(context, "Configuración SIP eliminada", Toast.LENGTH_SHORT).show()
                 }
             )
-            2 -> LogsTab(paddingValues = paddingValues)
+            3 -> LogsTab(paddingValues = paddingValues)
         }
     }
 }
@@ -1208,6 +1225,343 @@ fun LogsTab(paddingValues: PaddingValues) {
                     lineHeight = 16.sp,
                     color = MaterialTheme.colorScheme.onSurface
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun HistoryTab(paddingValues: PaddingValues) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val db = remember { SpamDatabase.getDatabase(context) }
+    val historyRepository = remember { ScreeningHistoryRepository(db.screeningHistoryDao()) }
+    
+    var historyItems by remember { mutableStateOf<List<ScreeningHistoryEntity>>(emptyList()) }
+    var expandedItemId by remember { mutableStateOf<Long?>(null) }
+    var playingItemId by remember { mutableStateOf<Long?>(null) }
+    var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    
+    val dateFormat = remember { SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()) }
+    
+    // Load history on first composition
+    LaunchedEffect(Unit) {
+        historyItems = historyRepository.getRecentScreenings(100)
+    }
+    
+    // Cleanup media player
+    DisposableEffect(Unit) {
+        onDispose {
+            mediaPlayer?.release()
+        }
+    }
+    
+    fun playRecording(item: ScreeningHistoryEntity) {
+        if (item.recordingPath.isNullOrEmpty()) return
+        
+        val file = File(item.recordingPath)
+        if (!file.exists()) {
+            Toast.makeText(context, "Grabación no encontrada", Toast.LENGTH_SHORT).show()
+            return
+        }
+        
+        scope.launch(Dispatchers.IO) {
+            try {
+                withContext(Dispatchers.Main) {
+                    mediaPlayer?.release()
+                    mediaPlayer = MediaPlayer().apply {
+                        setDataSource(item.recordingPath)
+                        prepare()
+                        start()
+                        setOnCompletionListener {
+                            playingItemId = null
+                        }
+                    }
+                    playingItemId = item.id
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Error reproduciendo: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+    
+    fun stopPlaying() {
+        mediaPlayer?.stop()
+        mediaPlayer?.release()
+        mediaPlayer = null
+        playingItemId = null
+    }
+    
+    fun deleteItem(item: ScreeningHistoryEntity) {
+        scope.launch(Dispatchers.IO) {
+            // Delete recording file if exists
+            item.recordingPath?.let { path ->
+                val file = File(path)
+                if (file.exists()) {
+                    file.delete()
+                }
+            }
+            
+            historyRepository.deleteScreening(item.id)
+            historyItems = historyRepository.getRecentScreenings(100)
+        }
+    }
+    
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(paddingValues)
+            .padding(16.dp)
+    ) {
+        Text(
+            text = "Historial de Screening",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        
+        Spacer(modifier = Modifier.height(8.dp))
+        
+        Text(
+            text = "${historyItems.size} llamadas analizadas",
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+        )
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        if (historyItems.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "No hay historial de llamadas",
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(historyItems) { item ->
+                    ScreeningHistoryItem(
+                        item = item,
+                        isExpanded = expandedItemId == item.id,
+                        isPlaying = playingItemId == item.id,
+                        dateFormat = dateFormat,
+                        onExpandToggle = {
+                            expandedItemId = if (expandedItemId == item.id) null else item.id
+                        },
+                        onPlay = { playRecording(item) },
+                        onStop = { stopPlaying() },
+                        onDelete = { deleteItem(item) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ScreeningHistoryItem(
+    item: ScreeningHistoryEntity,
+    isExpanded: Boolean,
+    isPlaying: Boolean,
+    dateFormat: SimpleDateFormat,
+    onExpandToggle: () -> Unit,
+    onPlay: () -> Unit,
+    onStop: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onExpandToggle() },
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (item.isSpam) 
+                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+            else 
+                MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            // Header row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = item.callerName ?: item.phoneNumber,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    if (item.callerName != null) {
+                        Text(
+                            text = item.phoneNumber,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+                
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Spam indicator
+                    Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .background(
+                                if (item.isSpam) Color.Red else Color.Green,
+                                shape = CircleShape
+                            )
+                    )
+                    
+                    // Accepted/Rejected icon
+                    Icon(
+                        imageVector = if (item.wasAccepted) Icons.Default.Call else Icons.Default.Close,
+                        contentDescription = if (item.wasAccepted) "Aceptada" else "Rechazada",
+                        modifier = Modifier.size(20.dp),
+                        tint = if (item.wasAccepted) Color.Green else Color.Red
+                    )
+                    
+                    // Expand/collapse icon
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (isExpanded) "Colapsar" else "Expandir",
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            
+            // Date and duration
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = dateFormat.format(Date(item.timestamp)),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+                
+                if (item.duration != null && item.duration > 0) {
+                    Text(
+                        text = "${item.duration}s",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            
+            // Caller purpose
+            if (!item.callerPurpose.isNullOrEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Propósito: ${item.callerPurpose}",
+                    fontSize = 13.sp,
+                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                )
+            }
+            
+            // Expanded content
+            if (isExpanded) {
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f))
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                // Spam analysis
+                if (item.isSpam) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Spam",
+                            tint = Color.Red,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Spam detectado (${(item.spamConfidence * 100).toInt()}% confianza)",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.Red
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                
+                // Transcription
+                Text(
+                    text = "Transcripción:",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = item.transcription?.ifEmpty { "Sin transcripción disponible" } ?: "Sin transcripción disponible",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                // Action buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Play/Stop button
+                    if (!item.recordingPath.isNullOrEmpty()) {
+                        OutlinedButton(
+                            onClick = { if (isPlaying) onStop() else onPlay() },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Close else Icons.Default.PlayArrow,
+                                contentDescription = if (isPlaying) "Detener" else "Reproducir",
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (isPlaying) "Detener" else "Reproducir")
+                        }
+                    }
+                    
+                    // Delete button
+                    OutlinedButton(
+                        onClick = onDelete,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = Color.Red
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Eliminar",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Eliminar")
+                    }
+                }
             }
         }
     }
