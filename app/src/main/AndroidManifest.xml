@@ -25,6 +25,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     
+    <!-- Permiso adicional requerido para FOREGROUND_SERVICE_PHONE_CALL en Android 14+ -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    
     <!-- Permisos para Linphone VoIP -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAMERA" />

@@ -48,7 +48,8 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         val allGranted = permissions.all { it.value }
         if (allGranted) {
-            // Permisos concedidos
+            // Permisos concedidos - forzar recomposición
+            recreate()
         }
     }
 
@@ -59,8 +60,12 @@ class MainActivity : ComponentActivity() {
             LinphoneSpamDetectorTheme {
                 MainScreen(
                     onRequestPermissions = { requestPermissions() },
-                    onRequestOverlayPermission = { PermissionsHelper.requestOverlayPermission(this) },
-                    onRequestBatteryOptimization = { PermissionsHelper.requestBatteryOptimizationExemption(this) }
+                    onRequestOverlayPermission = { 
+                        PermissionsHelper.requestOverlayPermission(this)
+                    },
+                    onRequestBatteryOptimization = { 
+                        PermissionsHelper.requestBatteryOptimizationExemption(this) 
+                    }
                 )
             }
         }
@@ -73,10 +78,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        // Forzar recomposición para actualizar estado de permisos
-    }
+    // onResume ya no es necesario con DisposableEffect y recreate()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -88,6 +90,7 @@ fun MainScreen(
 ) {
     val context = LocalContext.current
     val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
     var apiKey by remember { mutableStateOf(prefs.getString("gemini_api_key", "") ?: "") }
     var showApiKey by remember { mutableStateOf(false) }
@@ -99,8 +102,10 @@ fun MainScreen(
     var sipUsername by remember { mutableStateOf(prefs.getString("sip_username", "") ?: "") }
     var sipPassword by remember { mutableStateOf(prefs.getString("sip_password", "") ?: "") }
     var sipDomain by remember { mutableStateOf(prefs.getString("sip_domain", "") ?: "") }
+    var sipProtocol by remember { mutableStateOf(prefs.getString("sip_protocol", "UDP") ?: "UDP") }
     var showSipPassword by remember { mutableStateOf(false) }
     var sipConfigured by remember { mutableStateOf(prefs.getBoolean("sip_configured", false)) }
+    var sipRegistered by remember { mutableStateOf(false) }
     
     // Tab seleccionada
     var selectedTab by remember { mutableStateOf(0) }
@@ -110,7 +115,46 @@ fun MainScreen(
     var hasOverlayPermission by remember { mutableStateOf(PermissionsHelper.hasOverlayPermission(context)) }
     var hasBatteryExemption by remember { mutableStateOf(PermissionsHelper.isIgnoringBatteryOptimizations(context)) }
 
-    // Actualizar estados
+    // BroadcastReceiver para estado de registro SIP
+    DisposableEffect(Unit) {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == LinphoneService.ACTION_REGISTRATION_STATE_CHANGED) {
+                    sipRegistered = intent.getBooleanExtra(LinphoneService.EXTRA_IS_REGISTERED, false)
+                }
+            }
+        }
+        
+        val filter = android.content.IntentFilter(LinphoneService.ACTION_REGISTRATION_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+        
+        onDispose {
+            context.unregisterReceiver(receiver)
+        }
+    }
+
+    // Actualizar estados de permisos cuando la app regresa (onResume)
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hasAllPermissions = PermissionsHelper.hasAllPermissions(context)
+                hasOverlayPermission = PermissionsHelper.hasOverlayPermission(context)
+                hasBatteryExemption = PermissionsHelper.isIgnoringBatteryOptimizations(context)
+            }
+        }
+        
+        lifecycleOwner.lifecycle.addObserver(observer)
+        
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Actualizar estados iniciales
     LaunchedEffect(Unit) {
         hasAllPermissions = PermissionsHelper.hasAllPermissions(context)
         hasOverlayPermission = PermissionsHelper.hasOverlayPermission(context)
@@ -220,11 +264,14 @@ fun MainScreen(
                 sipUsername = sipUsername,
                 sipPassword = sipPassword,
                 sipDomain = sipDomain,
+                sipProtocol = sipProtocol,
                 showSipPassword = showSipPassword,
                 sipConfigured = sipConfigured,
+                sipRegistered = sipRegistered,
                 onUsernameChange = { sipUsername = it },
                 onPasswordChange = { sipPassword = it },
                 onDomainChange = { sipDomain = it },
+                onProtocolChange = { sipProtocol = it },
                 onTogglePasswordVisibility = { showSipPassword = !showSipPassword },
                 onSave = {
                     if (sipUsername.isBlank() || sipPassword.isBlank() || sipDomain.isBlank()) {
@@ -236,6 +283,7 @@ fun MainScreen(
                         putString("sip_username", sipUsername)
                         putString("sip_password", sipPassword)
                         putString("sip_domain", sipDomain)
+                        putString("sip_protocol", sipProtocol)
                         putBoolean("sip_configured", true)
                         apply()
                     }
@@ -259,13 +307,16 @@ fun MainScreen(
                         remove("sip_username")
                         remove("sip_password")
                         remove("sip_domain")
+                        remove("sip_protocol")
                         putBoolean("sip_configured", false)
                         apply()
                     }
                     sipUsername = ""
                     sipPassword = ""
                     sipDomain = ""
+                    sipProtocol = "UDP"
                     sipConfigured = false
+                    sipRegistered = false
                     Toast.makeText(context, "Configuración SIP eliminada", Toast.LENGTH_SHORT).show()
                 }
             )
@@ -724,11 +775,14 @@ fun SipConfigTab(
     sipUsername: String,
     sipPassword: String,
     sipDomain: String,
+    sipProtocol: String,
     showSipPassword: Boolean,
     sipConfigured: Boolean,
+    sipRegistered: Boolean,
     onUsernameChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
     onDomainChange: (String) -> Unit,
+    onProtocolChange: (String) -> Unit,
     onTogglePasswordVisibility: () -> Unit,
     onSave: () -> Unit,
     onClear: () -> Unit
@@ -761,20 +815,30 @@ fun SipConfigTab(
                         fontWeight = FontWeight.Bold,
                         fontSize = 18.sp
                     )
-                    if (sipConfigured) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = Color(0xFF4ecca3).copy(alpha = 0.2f)
-                        ) {
-                            Text(
-                                text = "CONFIGURADO",
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                fontSize = 10.sp,
-                                color = Color(0xFF4ecca3),
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
+                    Spacer(modifier = Modifier.weight(1f))
+                    
+                    // Indicador de estado de registro
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (sipRegistered) Color(0xFF4ecca3) 
+                                    else if (sipConfigured) Color(0xFFFF9800)
+                                    else MaterialTheme.colorScheme.error
+                                )
+                        )
+                        Text(
+                            text = if (sipRegistered) "Registrado" 
+                                   else if (sipConfigured) "Configurado"
+                                   else "Sin configurar",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
                     }
                 }
 
@@ -844,6 +908,40 @@ fun SipConfigTab(
                     },
                     shape = RoundedCornerShape(12.dp)
                 )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Selector de protocolo
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Protocolo de transporte",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf("UDP", "TCP", "TLS").forEach { protocol ->
+                            FilterChip(
+                                selected = sipProtocol == protocol,
+                                onClick = { onProtocolChange(protocol) },
+                                label = { Text(protocol) },
+                                leadingIcon = if (sipProtocol == protocol) {
+                                    {
+                                        Icon(
+                                            Icons.Default.Check,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                } else null
+                            )
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(20.dp))
 

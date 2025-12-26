@@ -34,6 +34,10 @@ class LinphoneService : Service() {
         // Estado del servicio
         var isRunning = false
             private set
+        
+        // Acción broadcast para notificar cambio de estado de registro
+        const val ACTION_REGISTRATION_STATE_CHANGED = "com.luisspamdetector.REGISTRATION_STATE_CHANGED"
+        const val EXTRA_IS_REGISTERED = "is_registered"
     }
 
     private var core: Core? = null
@@ -60,6 +64,8 @@ class LinphoneService : Service() {
             }
         }
     }
+
+    private var isReceiverRegistered = false
 
     override fun onCreate() {
         super.onCreate()
@@ -119,6 +125,8 @@ class LinphoneService : Service() {
         } else {
             registerReceiver(callActionReceiver, filter)
         }
+        isReceiverRegistered = true
+        Logger.d(TAG, "Receiver registrado correctamente")
     }
 
     private fun initializeLinphoneCore() {
@@ -239,26 +247,39 @@ class LinphoneService : Service() {
             RegistrationState.Ok -> {
                 Logger.i(TAG, "Cuenta registrada: ${account.params?.identityAddress?.asString()}")
                 updateNotification("Conectado: ${account.params?.identityAddress?.username}")
+                broadcastRegistrationState(true)
             }
             RegistrationState.Failed -> {
                 Logger.e(TAG, "Registro fallido: $message")
                 updateNotification("Error de conexión")
+                broadcastRegistrationState(false)
             }
             RegistrationState.Progress -> {
                 Logger.i(TAG, "Registrando...")
                 updateNotification("Conectando...")
+                broadcastRegistrationState(false)
             }
             RegistrationState.Cleared -> {
                 Logger.i(TAG, "Registro limpiado")
                 updateNotification("Desconectado")
+                broadcastRegistrationState(false)
             }
             RegistrationState.None -> {
                 Logger.i(TAG, "Sin registro")
+                broadcastRegistrationState(false)
             }
             RegistrationState.Refreshing -> {
                 Logger.i(TAG, "Refrescando registro...")
             }
         }
+    }
+
+    private fun broadcastRegistrationState(isRegistered: Boolean) {
+        val intent = Intent(ACTION_REGISTRATION_STATE_CHANGED).apply {
+            putExtra(EXTRA_IS_REGISTERED, isRegistered)
+        }
+        sendBroadcast(intent)
+        Logger.d(TAG, "Broadcasting registration state: $isRegistered")
     }
 
     private fun handleCallStateChanged(call: Call, state: Call.State, message: String) {
@@ -530,11 +551,18 @@ class LinphoneService : Service() {
         username: String,
         password: String,
         domain: String,
-        transport: TransportType = TransportType.Tls
+        protocol: String = "UDP"
     ): Boolean {
         return try {
             val core = this.core ?: return false
             val factory = Factory.instance()
+
+            // Convertir protocolo a TransportType
+            val transport = when (protocol.uppercase()) {
+                "TCP" -> TransportType.Tcp
+                "TLS" -> TransportType.Tls
+                else -> TransportType.Udp
+            }
 
             // Crear AccountParams
             val accountParams = core.createAccountParams()
@@ -572,7 +600,7 @@ class LinphoneService : Service() {
             // Establecer como cuenta por defecto
             core.defaultAccount = account
 
-            Logger.i(TAG, "Cuenta creada y registrando: $username@$domain")
+            Logger.i(TAG, "Cuenta creada y registrando: $username@$domain con protocolo $protocol")
             true
 
         } catch (e: Exception) {
@@ -606,14 +634,15 @@ class LinphoneService : Service() {
             val username = prefs.getString("sip_username", "") ?: ""
             val password = prefs.getString("sip_password", "") ?: ""
             val domain = prefs.getString("sip_domain", "") ?: ""
+            val protocol = prefs.getString("sip_protocol", "UDP") ?: "UDP"
             
             if (username.isBlank() || password.isBlank() || domain.isBlank()) {
                 Logger.w(TAG, "Configuración SIP incompleta")
                 return
             }
             
-            Logger.i(TAG, "Configurando cuenta SIP: $username@$domain")
-            val success = createAndRegisterAccount(username, password, domain)
+            Logger.i(TAG, "Configurando cuenta SIP: $username@$domain con protocolo $protocol")
+            val success = createAndRegisterAccount(username, password, domain, protocol)
             
             if (success) {
                 Logger.i(TAG, "Cuenta SIP configurada exitosamente")
@@ -643,11 +672,15 @@ class LinphoneService : Service() {
         // Cancelar coroutines
         serviceScope.cancel()
 
-        // Desregistrar receiver
-        try {
-            unregisterReceiver(callActionReceiver)
-        } catch (e: Exception) {
-            Logger.e(TAG, "Error unregistering receiver", e)
+        // Desregistrar receiver solo si fue registrado exitosamente
+        if (isReceiverRegistered) {
+            try {
+                unregisterReceiver(callActionReceiver)
+                isReceiverRegistered = false
+                Logger.d(TAG, "Receiver desregistrado correctamente")
+            } catch (e: Exception) {
+                Logger.e(TAG, "Error al desregistrar receiver", e)
+            }
         }
 
         // Limpiar call screening service
