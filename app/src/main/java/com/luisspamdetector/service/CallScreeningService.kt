@@ -225,37 +225,39 @@ class CallScreeningService(
     private fun speak(text: String, utteranceId: String) {
         Logger.d(TAG, "Speaking: $text")
         
-        // Mutear el micrófono de la llamada SIP durante TTS
-        // para que el llamante no escuche eco del TTS
-        microphoneCallback?.setMicrophoneMuted(true)
+        // En modo silencioso, el TTS debe salir por el altavoz
+        // y el micrófono del dispositivo lo captura para enviarlo al llamante via SIP
+        // NO muteamos el micrófono de la llamada - queremos que el TTS se envíe
         
-        // Configurar audio para modo de comunicación
+        // Configurar audio para que el TTS salga por el altavoz (no auricular)
         audioManager?.let { am ->
             am.mode = AudioManager.MODE_IN_COMMUNICATION
+            // Activar altavoz para que el micrófono capture el TTS
+            @Suppress("DEPRECATION")
             am.isSpeakerphoneOn = true
         }
         
         val params = Bundle().apply {
             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
-            // Usar stream de música ya que el stream de voz puede estar ocupado por Linphone
+            // Usar stream de música para que no interfiera con la llamada
             putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
         }
         
-        // Subir volumen de música para que el TTS se escuche
+        // Subir volumen para que el micrófono capture bien el TTS
         audioManager?.let { am ->
             val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            am.setStreamVolume(AudioManager.STREAM_MUSIC, maxVol, 0)
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, (maxVol * 0.8).toInt(), 0)
         }
         
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
     }
 
     private fun handleTTSCompleted(utteranceId: String?) {
-        // Desmutear el micrófono de la llamada para escuchar al llamante
-        microphoneCallback?.setMicrophoneMuted(false)
+        // En modo silencioso, no necesitamos controlar el micrófono
+        // El SpeechRecognizer escuchará el audio del altavoz (que es el audio remoto)
         
         scope.launch {
-            delay(300) // Pequeña pausa antes de escuchar
+            delay(500) // Pausa más larga para dar tiempo al llamante
 
             when (utteranceId) {
                 "greeting" -> {

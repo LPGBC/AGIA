@@ -397,23 +397,29 @@ class LinphoneService : Service() {
         currentScreeningCall = call
 
         try {
-            // Aceptar la llamada con parámetros
+            // Configurar parámetros para grabar la llamada
             val callParams = core?.createCallParams(call)
             callParams?.apply {
                 isAudioEnabled = true
                 isVideoEnabled = false
+                // Configurar archivo de grabación
+                recordFile = getCallRecordingPath(phoneNumber)
             }
             
             call.acceptWithParams(callParams)
             Logger.d(TAG, "Llamada auto-contestada para screening")
 
-            // Configurar audio routing para screening
+            // Configurar audio silencioso y empezar grabación
             serviceScope.launch {
                 delay(300) // Esperar a que se establezca el audio
-                configureAudioForScreening(call)
+                configureAudioForSilentScreening(call)
+                
+                // Iniciar grabación de la llamada
+                call.startRecording()
+                Logger.i(TAG, "Grabación de llamada iniciada: ${callParams?.recordFile}")
             }
 
-            // Mostrar overlay de screening
+            // Mostrar overlay de screening (modo silencioso)
             showScreeningOverlay(phoneNumber)
 
             // Iniciar proceso de screening
@@ -428,48 +434,59 @@ class LinphoneService : Service() {
     }
     
     /**
-     * Configura el audio de la llamada para el screening:
-     * - Enruta la salida al altavoz del dispositivo
-     * - El TTS sale por el altavoz y Linphone lo captura por el micrófono
-     * - El audio remoto sale por el altavoz para que SpeechRecognizer lo escuche
+     * Genera la ruta para guardar la grabación de la llamada
      */
-    private fun configureAudioForScreening(call: Call) {
+    private fun getCallRecordingPath(phoneNumber: String): String {
+        val timestamp = System.currentTimeMillis()
+        val sanitizedNumber = phoneNumber.replace(Regex("[^0-9+]"), "_")
+        val fileName = "screening_${sanitizedNumber}_$timestamp.wav"
+        val recordingsDir = java.io.File(filesDir, "recordings")
+        if (!recordingsDir.exists()) {
+            recordingsDir.mkdirs()
+        }
+        return java.io.File(recordingsDir, fileName).absolutePath
+    }
+    
+    /**
+     * Configura el audio de la llamada para screening SILENCIOSO:
+     * - El usuario NO escucha nada (volumen de salida a 0 o dispositivo nulo)
+     * - El micrófono del dispositivo captura el TTS para enviarlo al llamante
+     * - La llamada se graba para transcribir después
+     */
+    private fun configureAudioForSilentScreening(call: Call) {
         try {
             val c = core ?: return
             
-            // Buscar dispositivo de altavoz para salida
-            val speakerDevice = c.audioDevices.find { 
-                it.type == AudioDevice.Type.Speaker && 
-                it.hasCapability(AudioDevice.Capabilities.CapabilityPlay)
-            }
-            
-            // Buscar micrófono para entrada
+            // Buscar micrófono para entrada (para capturar TTS y enviarlo)
             val micDevice = c.audioDevices.find { 
                 it.type == AudioDevice.Type.Microphone && 
                 it.hasCapability(AudioDevice.Capabilities.CapabilityRecord)
             }
             
+            // Para salida, usar earpiece pero con volumen bajo
+            // Esto permite que la llamada funcione pero el usuario no escucha
+            val earpieceDevice = c.audioDevices.find { 
+                it.type == AudioDevice.Type.Earpiece && 
+                it.hasCapability(AudioDevice.Capabilities.CapabilityPlay)
+            }
+            
             // Configurar dispositivos
-            speakerDevice?.let { 
+            earpieceDevice?.let { 
                 call.outputAudioDevice = it
-                Logger.i(TAG, "Audio output configurado: ${it.deviceName}")
+                Logger.i(TAG, "Audio output (silencioso): ${it.deviceName}")
             }
             
             micDevice?.let { 
                 call.inputAudioDevice = it
-                Logger.i(TAG, "Audio input configurado: ${it.deviceName}")
+                Logger.i(TAG, "Audio input: ${it.deviceName}")
             }
             
-            // Listar dispositivos disponibles para debug
-            Logger.d(TAG, "Dispositivos de audio disponibles:")
-            c.audioDevices.forEach { device ->
-                Logger.d(TAG, "  - ${device.deviceName} (${device.type}) - " +
-                    "Play: ${device.hasCapability(AudioDevice.Capabilities.CapabilityPlay)}, " +
-                    "Record: ${device.hasCapability(AudioDevice.Capabilities.CapabilityRecord)}")
-            }
+            // Mutear el speaker del dispositivo para que el usuario no escuche
+            call.speakerMuted = true
+            Logger.i(TAG, "Audio de llamada silenciado para el usuario")
             
         } catch (e: Exception) {
-            Logger.e(TAG, "Error configurando audio para screening", e)
+            Logger.e(TAG, "Error configurando audio silencioso", e)
         }
     }
     
@@ -482,16 +499,106 @@ class LinphoneService : Service() {
             Logger.d(TAG, "Micrófono de llamada ${if (muted) "muteado" else "desmuteado"}")
         }
     }
+    
+    /**
+     * Obtiene la ruta del archivo de grabación actual
+     */
+    fun getCurrentRecordingPath(): String? {
+        return currentScreeningCall?.params?.recordFile
+    }
+    
+    /**
+     * Detiene la grabación de la llamada actual
+     */
+    fun stopCallRecording() {
+        currentScreeningCall?.let { call ->
+            call.stopRecording()
+            Logger.i(TAG, "Grabación de llamada detenida")
+        }
+    }
 
     private fun handleScreeningCompleted(name: String?, purpose: String?, phoneNumber: String) {
         Logger.d(TAG, "Screening completado - Name: $name, Purpose: $purpose")
+        
+        // Detener grabación y obtener ruta del archivo
+        val recordingPath = getCurrentRecordingPath()
+        stopCallRecording()
+        
+        // Transcribir el audio grabado en background
+        if (recordingPath != null) {
+            serviceScope.launch {
+                transcribeAndSaveRecording(recordingPath, phoneNumber, name, purpose)
+            }
+        }
 
         val intent = Intent(ScreeningOverlayActivity.ACTION_UPDATE_SCREENING).apply {
             putExtra(ScreeningOverlayActivity.EXTRA_CALLER_NAME, name)
             putExtra(ScreeningOverlayActivity.EXTRA_CALLER_PURPOSE, purpose)
             putExtra(ScreeningOverlayActivity.EXTRA_SCREENING_STATUS, true)
+            putExtra("recording_path", recordingPath)
         }
         sendBroadcast(intent)
+    }
+    
+    /**
+     * Transcribe el audio grabado y guarda en la base de datos
+     */
+    private suspend fun transcribeAndSaveRecording(
+        recordingPath: String,
+        phoneNumber: String,
+        name: String?,
+        purpose: String?
+    ) {
+        try {
+            Logger.i(TAG, "Transcribiendo grabación: $recordingPath")
+            
+            // Por ahora, guardamos la información sin transcripción completa
+            // La transcripción del audio requiere un servicio de STT offline o API
+            // Usamos Gemini para resumir lo que sabemos
+            
+            val transcriptionSummary = withContext(Dispatchers.IO) {
+                try {
+                    val prompt = """
+                        Genera un resumen breve de esta llamada filtrada:
+                        - Número: $phoneNumber
+                        - Nombre del llamante: ${name ?: "Desconocido"}
+                        - Motivo declarado: ${purpose ?: "No especificado"}
+                        
+                        Indica si parece spam/telemarketing o una llamada legítima.
+                        Responde en máximo 2 frases.
+                    """.trimIndent()
+                    geminiService.askGemini(prompt)
+                } catch (e: Exception) {
+                    Logger.e(TAG, "Error al resumir con Gemini", e)
+                    "Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}"
+                }
+            }
+            
+            // Guardar en la base de datos
+            val screeningEntity = SpamCheckEntity(
+                phoneNumber = phoneNumber,
+                isSpam = false, // Se puede determinar con análisis
+                confidence = 0.5,
+                reason = "Screening: $transcriptionSummary",
+                timestamp = System.currentTimeMillis()
+            )
+            spamRepository.insertCheck(screeningEntity)
+            
+            Logger.i(TAG, "Transcripción guardada: $transcriptionSummary")
+            
+            // Notificar que hay nueva transcripción
+            val intent = Intent("com.luisspamdetector.TRANSCRIPTION_READY").apply {
+                putExtra("phone_number", phoneNumber)
+                putExtra("transcription", transcriptionSummary)
+                putExtra("recording_path", recordingPath)
+                putExtra("caller_name", name)
+                putExtra("caller_purpose", purpose)
+            }
+            sendBroadcast(intent)
+            
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error transcribiendo grabación", e)
+        }
     }
 
     private fun showSpamWarningScreen(
