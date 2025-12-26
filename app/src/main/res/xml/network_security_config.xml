@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    
+    <!-- Permitir tráfico a dominios específicos de Linphone y Gemini -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">linphone.org</domain>
+        <domain includeSubdomains="true">sip.linphone.org</domain>
+        <domain includeSubdomains="true">generativelanguage.googleapis.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>
