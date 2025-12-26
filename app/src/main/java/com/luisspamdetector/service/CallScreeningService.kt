@@ -3,6 +3,7 @@ import com.luisspamdetector.util.Logger
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -22,6 +23,14 @@ import java.util.*
  * 4. Envía la información a una actividad overlay para que el usuario decida
  * 
  * Actualizado para Linphone SDK 5.4.x y Android 15
+ * 
+ * NOTA: El audio funciona así:
+ * - El TTS sale por el altavoz del dispositivo
+ * - Linphone captura el audio del micrófono y lo envía al llamante
+ * - El audio del llamante sale por el altavoz
+ * - SpeechRecognizer escucha el micrófono del dispositivo
+ * - Durante TTS: muteamos el mic de la llamada para evitar eco
+ * - Durante STT: desmuteamos para escuchar al llamante
  */
 class CallScreeningService(
     private val context: Context,
@@ -36,6 +45,8 @@ class CallScreeningService(
     private var tts: TextToSpeech? = null
     private var speechRecognizer: SpeechRecognizer? = null
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var audioManager: AudioManager? = null
+    private var linphoneService: LinphoneService? = null
 
     private var isInitialized = false
     private var currentCall: Call? = null
@@ -58,11 +69,19 @@ class CallScreeningService(
         fun onScreeningCompleted(name: String?, purpose: String?, phoneNumber: String)
         fun onScreeningFailed(reason: String)
     }
+    
+    /** Callback para controlar el micrófono de la llamada Linphone */
+    interface MicrophoneCallback {
+        fun setMicrophoneMuted(muted: Boolean)
+    }
 
     private var screeningCallback: ScreeningCallback? = null
+    private var microphoneCallback: MicrophoneCallback? = null
 
-    fun initialize(callback: ScreeningCallback) {
+    fun initialize(callback: ScreeningCallback, micCallback: MicrophoneCallback? = null) {
         this.screeningCallback = callback
+        this.microphoneCallback = micCallback
+        this.audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
         scope.launch {
             try {
@@ -206,15 +225,35 @@ class CallScreeningService(
     private fun speak(text: String, utteranceId: String) {
         Logger.d(TAG, "Speaking: $text")
         
+        // Mutear el micrófono de la llamada SIP durante TTS
+        // para que el llamante no escuche eco del TTS
+        microphoneCallback?.setMicrophoneMuted(true)
+        
+        // Configurar audio para modo de comunicación
+        audioManager?.let { am ->
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            am.isSpeakerphoneOn = true
+        }
+        
         val params = Bundle().apply {
             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
-            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, android.media.AudioManager.STREAM_VOICE_CALL)
+            // Usar stream de música ya que el stream de voz puede estar ocupado por Linphone
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+        }
+        
+        // Subir volumen de música para que el TTS se escuche
+        audioManager?.let { am ->
+            val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            am.setStreamVolume(AudioManager.STREAM_MUSIC, maxVol, 0)
         }
         
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
     }
 
     private fun handleTTSCompleted(utteranceId: String?) {
+        // Desmutear el micrófono de la llamada para escuchar al llamante
+        microphoneCallback?.setMicrophoneMuted(false)
+        
         scope.launch {
             delay(300) // Pequeña pausa antes de escuchar
 

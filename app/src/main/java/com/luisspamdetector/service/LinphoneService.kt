@@ -102,15 +102,22 @@ class LinphoneService : Service() {
         // Inicializar call screening si hay API key
         if (apiKey.isNotEmpty()) {
             callScreeningService = CallScreeningService(this, geminiService)
-            callScreeningService?.initialize(object : CallScreeningService.ScreeningCallback {
-                override fun onScreeningCompleted(name: String?, purpose: String?, phoneNumber: String) {
-                    handleScreeningCompleted(name, purpose, phoneNumber)
-                }
+            callScreeningService?.initialize(
+                callback = object : CallScreeningService.ScreeningCallback {
+                    override fun onScreeningCompleted(name: String?, purpose: String?, phoneNumber: String) {
+                        handleScreeningCompleted(name, purpose, phoneNumber)
+                    }
 
-                override fun onScreeningFailed(reason: String) {
-                    Logger.e(TAG, "Screening falló: $reason")
+                    override fun onScreeningFailed(reason: String) {
+                        Logger.e(TAG, "Screening falló: $reason")
+                    }
+                },
+                micCallback = object : CallScreeningService.MicrophoneCallback {
+                    override fun setMicrophoneMuted(muted: Boolean) {
+                        setCallMicrophoneMuted(muted)
+                    }
                 }
-            })
+            )
         }
     }
 
@@ -400,6 +407,12 @@ class LinphoneService : Service() {
             call.acceptWithParams(callParams)
             Logger.d(TAG, "Llamada auto-contestada para screening")
 
+            // Configurar audio routing para screening
+            serviceScope.launch {
+                delay(300) // Esperar a que se establezca el audio
+                configureAudioForScreening(call)
+            }
+
             // Mostrar overlay de screening
             showScreeningOverlay(phoneNumber)
 
@@ -411,6 +424,62 @@ class LinphoneService : Service() {
 
         } catch (e: Exception) {
             Logger.e(TAG, "Error al auto-contestar llamada", e)
+        }
+    }
+    
+    /**
+     * Configura el audio de la llamada para el screening:
+     * - Enruta la salida al altavoz del dispositivo
+     * - El TTS sale por el altavoz y Linphone lo captura por el micrófono
+     * - El audio remoto sale por el altavoz para que SpeechRecognizer lo escuche
+     */
+    private fun configureAudioForScreening(call: Call) {
+        try {
+            val c = core ?: return
+            
+            // Buscar dispositivo de altavoz para salida
+            val speakerDevice = c.audioDevices.find { 
+                it.type == AudioDevice.Type.Speaker && 
+                it.hasCapability(AudioDevice.Capabilities.CapabilityPlay)
+            }
+            
+            // Buscar micrófono para entrada
+            val micDevice = c.audioDevices.find { 
+                it.type == AudioDevice.Type.Microphone && 
+                it.hasCapability(AudioDevice.Capabilities.CapabilityRecord)
+            }
+            
+            // Configurar dispositivos
+            speakerDevice?.let { 
+                call.outputAudioDevice = it
+                Logger.i(TAG, "Audio output configurado: ${it.deviceName}")
+            }
+            
+            micDevice?.let { 
+                call.inputAudioDevice = it
+                Logger.i(TAG, "Audio input configurado: ${it.deviceName}")
+            }
+            
+            // Listar dispositivos disponibles para debug
+            Logger.d(TAG, "Dispositivos de audio disponibles:")
+            c.audioDevices.forEach { device ->
+                Logger.d(TAG, "  - ${device.deviceName} (${device.type}) - " +
+                    "Play: ${device.hasCapability(AudioDevice.Capabilities.CapabilityPlay)}, " +
+                    "Record: ${device.hasCapability(AudioDevice.Capabilities.CapabilityRecord)}")
+            }
+            
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error configurando audio para screening", e)
+        }
+    }
+    
+    /**
+     * Mutea/desmutea el micrófono de la llamada actual
+     */
+    fun setCallMicrophoneMuted(muted: Boolean) {
+        currentScreeningCall?.let { call ->
+            call.microphoneMuted = muted
+            Logger.d(TAG, "Micrófono de llamada ${if (muted) "muteado" else "desmuteado"}")
         }
     }
 
