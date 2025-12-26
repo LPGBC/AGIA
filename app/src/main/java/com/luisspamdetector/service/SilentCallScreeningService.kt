@@ -273,6 +273,10 @@ class SilentCallScreeningService(
         
         Logger.i(TAG, "Screening completed for: $phoneNumber, recording: $recordingPath")
         
+        // Terminar la llamada automáticamente (estilo iOS)
+        currentCall?.terminate()
+        Logger.i(TAG, "Call terminated automatically after screening")
+        
         screeningCallback?.onScreeningCompleted(phoneNumber, recordingPath)
         
         cleanup()
