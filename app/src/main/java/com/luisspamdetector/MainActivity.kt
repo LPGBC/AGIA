@@ -97,6 +97,7 @@ fun MainScreen(
     var serviceEnabled by remember { mutableStateOf(prefs.getBoolean("service_enabled", false)) }
     var spamDetectionEnabled by remember { mutableStateOf(prefs.getBoolean("spam_detection_enabled", true)) }
     var callScreeningEnabled by remember { mutableStateOf(prefs.getBoolean("call_screening_enabled", false)) }
+    var testModeEnabled by remember { mutableStateOf(prefs.getBoolean("test_mode_enabled", false)) }
     
     // Variables SIP
     var sipUsername by remember { mutableStateOf(prefs.getString("sip_username", "") ?: "") }
@@ -207,6 +208,7 @@ fun MainScreen(
                 showApiKey = showApiKey,
                 spamDetectionEnabled = spamDetectionEnabled,
                 callScreeningEnabled = callScreeningEnabled,
+                testModeEnabled = testModeEnabled,
                 hasAllPermissions = hasAllPermissions,
                 hasOverlayPermission = hasOverlayPermission,
                 hasBatteryExemption = hasBatteryExemption,
@@ -251,6 +253,10 @@ fun MainScreen(
                     }
                     callScreeningEnabled = enabled
                     prefs.edit().putBoolean("call_screening_enabled", enabled).apply()
+                },
+                onTestModeChange = { enabled ->
+                    testModeEnabled = enabled
+                    prefs.edit().putBoolean("test_mode_enabled", enabled).apply()
                 },
                 onRequestPermissions = {
                     onRequestPermissions()
@@ -333,6 +339,7 @@ fun MainTab(
     showApiKey: Boolean,
     spamDetectionEnabled: Boolean,
     callScreeningEnabled: Boolean,
+    testModeEnabled: Boolean,
     hasAllPermissions: Boolean,
     hasOverlayPermission: Boolean,
     hasBatteryExemption: Boolean,
@@ -341,6 +348,7 @@ fun MainTab(
     onToggleApiKeyVisibility: () -> Unit,
     onSpamDetectionChange: (Boolean) -> Unit,
     onCallScreeningChange: (Boolean) -> Unit,
+    onTestModeChange: (Boolean) -> Unit,
     onRequestPermissions: () -> Unit,
     onRequestOverlay: () -> Unit,
     onRequestBattery: () -> Unit
@@ -388,8 +396,10 @@ fun MainTab(
             DetectionOptionsCard(
                 spamDetectionEnabled = spamDetectionEnabled,
                 callScreeningEnabled = callScreeningEnabled,
+                testModeEnabled = testModeEnabled,
                 onSpamDetectionChange = onSpamDetectionChange,
-                onCallScreeningChange = onCallScreeningChange
+                onCallScreeningChange = onCallScreeningChange,
+                onTestModeChange = onTestModeChange
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -641,8 +651,10 @@ fun ApiConfigCard(
 fun DetectionOptionsCard(
     spamDetectionEnabled: Boolean,
     callScreeningEnabled: Boolean,
+    testModeEnabled: Boolean,
     onSpamDetectionChange: (Boolean) -> Unit,
-    onCallScreeningChange: (Boolean) -> Unit
+    onCallScreeningChange: (Boolean) -> Unit,
+    onTestModeChange: (Boolean) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -723,6 +735,45 @@ fun DetectionOptionsCard(
                     checked = callScreeningEnabled,
                     onCheckedChange = onCallScreeningChange
                 )
+            }
+
+            // Modo de prueba (solo visible si call screening está activado)
+            if (callScreeningEnabled) {
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Science,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Modo Prueba",
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 14.sp
+                            )
+                        }
+                        Text(
+                            text = "Screening de TODAS las llamadas (incluye contactos)",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                    }
+                    Checkbox(
+                        checked = testModeEnabled,
+                        onCheckedChange = onTestModeChange
+                    )
+                }
             }
         }
     }

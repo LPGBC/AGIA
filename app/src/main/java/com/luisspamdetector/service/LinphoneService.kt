@@ -311,17 +311,24 @@ class LinphoneService : Service() {
     private fun handleIncomingCall(call: Call, phoneNumber: String) {
         serviceScope.launch {
             try {
-                // 1. Verificar si está en contactos
-                if (contactsHelper.isNumberInContacts(phoneNumber)) {
-                    val name = contactsHelper.getContactName(phoneNumber)
-                    Logger.d(TAG, "Número en contactos: $name - ignorando")
-                    return@launch
-                }
-
-                // 2. Obtener configuración
+                // 1. Obtener configuración
                 val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
                 val callScreeningEnabled = prefs.getBoolean("call_screening_enabled", false)
                 val spamDetectionEnabled = prefs.getBoolean("spam_detection_enabled", true)
+                val testModeEnabled = prefs.getBoolean("test_mode_enabled", false)
+
+                // 2. Verificar si está en contactos (solo si NO está en modo prueba)
+                if (!testModeEnabled && contactsHelper.isNumberInContacts(phoneNumber)) {
+                    val name = contactsHelper.getContactName(phoneNumber)
+                    Logger.d(TAG, "Número en contactos: $name - ignorando (modo prueba: desactivado)")
+                    return@launch
+                }
+
+                if (testModeEnabled) {
+                    Logger.i(TAG, "MODO PRUEBA: Procesando llamada de $phoneNumber")
+                }
+
+                // 3. Procesar según configuración
 
                 when {
                     callScreeningEnabled -> {
