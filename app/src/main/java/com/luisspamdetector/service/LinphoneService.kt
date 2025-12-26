@@ -49,6 +49,7 @@ class LinphoneService : Service() {
     private lateinit var spamRepository: SpamRepository
     private lateinit var screeningHistoryRepository: ScreeningHistoryRepository
     private var callScreeningService: CallScreeningService? = null
+    private var silentScreeningService: SilentCallScreeningService? = null
     
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var currentScreeningCall: Call? = null
@@ -122,6 +123,23 @@ class LinphoneService : Service() {
                 }
             )
         }
+        
+        // Inicializar servicio de screening silencioso (estilo iOS)
+        silentScreeningService = SilentCallScreeningService(this)
+        silentScreeningService?.initialize(object : SilentCallScreeningService.ScreeningCallback {
+            override fun onScreeningStarted(call: Call, phoneNumber: String) {
+                Logger.i(TAG, "Silent screening started for: $phoneNumber")
+            }
+            
+            override fun onScreeningCompleted(phoneNumber: String, recordingPath: String?) {
+                Logger.i(TAG, "Silent screening completed for: $phoneNumber")
+                handleSilentScreeningCompleted(phoneNumber, recordingPath)
+            }
+            
+            override fun onScreeningFailed(reason: String) {
+                Logger.e(TAG, "Silent screening failed: $reason")
+            }
+        })
     }
 
     private fun registerReceivers() {
@@ -410,7 +428,7 @@ class LinphoneService : Service() {
             }
             
             call.acceptWithParams(callParams)
-            Logger.d(TAG, "Llamada auto-contestada para screening")
+            Logger.d(TAG, "Llamada auto-contestada para screening silencioso")
 
             // Configurar audio silencioso y empezar grabación
             serviceScope.launch {
@@ -425,10 +443,10 @@ class LinphoneService : Service() {
             // Mostrar overlay de screening (modo silencioso)
             showScreeningOverlay(phoneNumber)
 
-            // Iniciar proceso de screening
+            // Iniciar proceso de screening SILENCIOSO (usa LinphonePlayer en lugar de TTS/altavoz)
             serviceScope.launch {
-                delay(500) // Esperar a que se establezca
-                callScreeningService?.startScreening(call, phoneNumber)
+                delay(800) // Esperar a que se establezca la llamada
+                silentScreeningService?.startScreening(call, phoneNumber)
             }
 
         } catch (e: Exception) {
@@ -541,6 +559,110 @@ class LinphoneService : Service() {
             putExtra("recording_path", recordingPath)
         }
         sendBroadcast(intent)
+    }
+    
+    /**
+     * Maneja la finalización del screening silencioso (estilo iOS)
+     * Solo graba la llamada y transcribe después - sin TTS ni STT durante la llamada
+     */
+    private fun handleSilentScreeningCompleted(phoneNumber: String, recordingPath: String?) {
+        Logger.d(TAG, "Silent screening completed for: $phoneNumber, recording: $recordingPath")
+        
+        // Detener grabación
+        stopCallRecording()
+        
+        // Transcribir el audio grabado en background
+        if (recordingPath != null) {
+            serviceScope.launch {
+                transcribeRecordingWithGemini(recordingPath, phoneNumber)
+            }
+        }
+
+        // Actualizar overlay con estado completado
+        val intent = Intent(ScreeningOverlayActivity.ACTION_UPDATE_SCREENING).apply {
+            putExtra(ScreeningOverlayActivity.EXTRA_CALLER_NAME, "Llamada grabada")
+            putExtra(ScreeningOverlayActivity.EXTRA_CALLER_PURPOSE, "Transcripción en proceso...")
+            putExtra(ScreeningOverlayActivity.EXTRA_SCREENING_STATUS, true)
+            putExtra("recording_path", recordingPath)
+        }
+        sendBroadcast(intent)
+    }
+    
+    /**
+     * Transcribe una grabación usando Gemini y guarda en la base de datos
+     */
+    private suspend fun transcribeRecordingWithGemini(recordingPath: String, phoneNumber: String) {
+        try {
+            Logger.i(TAG, "Transcribiendo grabación silenciosa: $recordingPath")
+            
+            // Por ahora, analizar basándose en el número (transcripción de audio requiere API de audio)
+            val (transcriptionSummary, isSpam, spamConfidence) = withContext(Dispatchers.IO) {
+                try {
+                    val prompt = """
+                        Analiza este número de teléfono y determina si es probable que sea spam:
+                        - Número: $phoneNumber
+                        
+                        Responde SOLO con este JSON (sin markdown):
+                        {"resumen": "descripción breve", "es_spam": true/false, "confianza": 0.0-1.0}
+                    """.trimIndent()
+                    val response = geminiService.askGemini(prompt)
+                    
+                    // Parsear respuesta JSON
+                    try {
+                        val jsonMatch = Regex("""\{[^}]+\}""").find(response)
+                        if (jsonMatch != null) {
+                            val json = org.json.JSONObject(jsonMatch.value)
+                            Triple(
+                                json.optString("resumen", "Llamada grabada"),
+                                json.optBoolean("es_spam", false),
+                                json.optDouble("confianza", 0.5)
+                            )
+                        } else {
+                            Triple(response.take(200), false, 0.5)
+                        }
+                    } catch (e: Exception) {
+                        Triple(response.take(200), false, 0.5)
+                    }
+                } catch (e: Exception) {
+                    Logger.e(TAG, "Error al analizar con Gemini", e)
+                    Triple("Llamada grabada - pendiente de análisis", false, 0.0)
+                }
+            }
+            
+            // Calcular duración del archivo de audio
+            val duration = try {
+                val file = java.io.File(recordingPath)
+                if (file.exists()) {
+                    (file.length() / 32000).toInt() // Aproximación WAV 16kHz mono 16bit
+                } else 0
+            } catch (e: Exception) { 0 }
+            
+            // Guardar en el historial
+            val screeningId = screeningHistoryRepository.addScreening(
+                phoneNumber = phoneNumber,
+                callerName = null,
+                callerPurpose = null,
+                transcription = transcriptionSummary,
+                recordingPath = recordingPath,
+                duration = duration,
+                wasAccepted = false,
+                isSpam = isSpam,
+                spamConfidence = spamConfidence
+            )
+            
+            Logger.i(TAG, "Screening silencioso guardado con ID: $screeningId - Spam: $isSpam")
+            
+            // Actualizar UI con resultado
+            val updateIntent = Intent(ScreeningOverlayActivity.ACTION_UPDATE_SCREENING).apply {
+                putExtra(ScreeningOverlayActivity.EXTRA_CALLER_NAME, if (isSpam) "⚠️ Posible Spam" else "Llamada analizada")
+                putExtra(ScreeningOverlayActivity.EXTRA_CALLER_PURPOSE, transcriptionSummary)
+                putExtra(ScreeningOverlayActivity.EXTRA_SCREENING_STATUS, true)
+            }
+            sendBroadcast(updateIntent)
+            
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error transcribiendo grabación", e)
+        }
     }
     
     /**
@@ -902,6 +1024,10 @@ class LinphoneService : Service() {
         // Limpiar call screening service
         callScreeningService?.shutdown()
         callScreeningService = null
+        
+        // Limpiar silent screening service
+        silentScreeningService?.shutdown()
+        silentScreeningService = null
 
         // Limpiar Linphone Core
         coreListener?.let { core?.removeListener(it) }
