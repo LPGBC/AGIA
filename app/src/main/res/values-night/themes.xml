@@ -1,24 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.LinphoneSpamDetector" parent="Theme.Material3.Dark.NoActionBar">
-        <item name="colorPrimary">@color/primary</item>
-        <item name="colorPrimaryContainer">@color/primary_variant</item>
-        <item name="colorSecondary">@color/secondary</item>
+    <style name="Theme.LinphoneSpamDetector" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorPrimary">@color/primary</item>
+        <item name="android:colorAccent">@color/secondary</item>
         <item name="android:colorBackground">@color/background</item>
-        <item name="colorSurface">@color/surface</item>
-        <item name="colorError">@color/error</item>
-        <item name="colorOnPrimary">@color/on_primary</item>
-        <item name="colorOnSecondary">@color/on_secondary</item>
-        <item name="colorOnBackground">@color/on_background</item>
-        <item name="colorOnSurface">@color/on_surface</item>
-        <item name="colorOnError">@color/on_error</item>
+        <item name="android:colorError">@color/error</item>
         
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 
-    <style name="Theme.LinphoneSpamDetector.Overlay" parent="Theme.Material3.Dark.NoActionBar">
+    <style name="Theme.LinphoneSpamDetector.Overlay" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowNoTitle">true</item>

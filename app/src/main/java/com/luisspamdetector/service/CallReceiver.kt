@@ -1,11 +1,11 @@
 package com.luisspamdetector.service
+import com.luisspamdetector.util.Logger
 
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.telephony.TelephonyManager
-import android.util.Log
 import com.luisspamdetector.util.PermissionsHelper
 
 /**
@@ -25,7 +25,7 @@ class CallReceiver : BroadcastReceiver() {
         }
 
         if (!PermissionsHelper.hasPhoneStatePermission(context)) {
-            Log.w(TAG, "No hay permisos de teléfono")
+            Logger.w(TAG, "No hay permisos de teléfono")
             return
         }
 
@@ -43,17 +43,17 @@ class CallReceiver : BroadcastReceiver() {
                 }
 
                 if (phoneNumber != null) {
-                    Log.d(TAG, "Llamada entrante detectada (GSM): $phoneNumber")
+                    Logger.d(TAG, "Llamada entrante detectada (GSM): $phoneNumber")
                     ensureServiceRunning(context)
                 } else {
-                    Log.d(TAG, "Llamada entrante detectada pero número no disponible")
+                    Logger.d(TAG, "Llamada entrante detectada pero número no disponible")
                 }
             }
             TelephonyManager.EXTRA_STATE_OFFHOOK -> {
-                Log.d(TAG, "Llamada contestada")
+                Logger.d(TAG, "Llamada contestada")
             }
             TelephonyManager.EXTRA_STATE_IDLE -> {
-                Log.d(TAG, "Llamada terminada")
+                Logger.d(TAG, "Llamada terminada")
             }
         }
     }
@@ -61,7 +61,7 @@ class CallReceiver : BroadcastReceiver() {
     private fun ensureServiceRunning(context: Context) {
         // Verificar si el servicio ya está corriendo
         if (LinphoneService.isRunning) {
-            Log.d(TAG, "LinphoneService ya está corriendo")
+            Logger.d(TAG, "LinphoneService ya está corriendo")
             return
         }
 
@@ -70,12 +70,12 @@ class CallReceiver : BroadcastReceiver() {
         val apiKey = prefs.getString("gemini_api_key", "") ?: ""
 
         if (apiKey.isEmpty()) {
-            Log.d(TAG, "API key no configurada - no iniciando servicio")
+            Logger.d(TAG, "API key no configurada - no iniciando servicio")
             return
         }
 
         // Iniciar servicio
-        Log.d(TAG, "Iniciando LinphoneService desde CallReceiver")
+        Logger.d(TAG, "Iniciando LinphoneService desde CallReceiver")
         val serviceIntent = Intent(context, LinphoneService::class.java)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

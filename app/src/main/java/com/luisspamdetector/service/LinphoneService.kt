@@ -4,7 +4,6 @@ import android.app.*
 import android.content.*
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.luisspamdetector.MainActivity
@@ -16,6 +15,7 @@ import com.luisspamdetector.data.SpamRepository
 import com.luisspamdetector.ui.IncomingCallActivity
 import com.luisspamdetector.ui.ScreeningOverlayActivity
 import com.luisspamdetector.util.ContactsHelper
+import com.luisspamdetector.util.Logger
 import kotlinx.coroutines.*
 import org.linphone.core.*
 
@@ -63,15 +63,24 @@ class LinphoneService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "LinphoneService onCreate")
+        Logger.d(TAG, "LinphoneService onCreate")
 
-        initializeComponents()
-        createNotificationChannels()
-        startForegroundServiceCompat()
-        initializeLinphoneCore()
-        registerReceivers()
-        
-        isRunning = true
+        try {
+            initializeComponents()
+            createNotificationChannels()
+            startForegroundServiceCompat()
+            initializeLinphoneCore()
+            registerReceivers()
+            
+            // Configurar cuenta SIP si está disponible
+            configureSipAccountIfAvailable()
+            
+            isRunning = true
+            Logger.i(TAG, "LinphoneService iniciado correctamente")
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error crítico al iniciar LinphoneService", e)
+            stopSelf()
+        }
     }
 
     private fun initializeComponents() {
@@ -93,7 +102,7 @@ class LinphoneService : Service() {
                 }
 
                 override fun onScreeningFailed(reason: String) {
-                    Log.e(TAG, "Screening falló: $reason")
+                    Logger.e(TAG, "Screening falló: $reason")
                 }
             })
         }
@@ -120,10 +129,12 @@ class LinphoneService : Service() {
             // Crear el Core usando el factory
             core = factory.createCore(null, null, this)
             
+            Logger.i(TAG, "Linphone Core creado exitosamente")
+            
             // Configurar el listener usando CoreListenerStub (API moderna)
             coreListener = object : CoreListenerStub() {
                 override fun onGlobalStateChanged(core: Core, state: GlobalState, message: String) {
-                    Log.d(TAG, "Global state changed: $state - $message")
+                    Logger.d(TAG, "Global state changed: $state - $message")
                     handleGlobalStateChanged(state, message)
                 }
 
@@ -133,7 +144,7 @@ class LinphoneService : Service() {
                     state: RegistrationState,
                     message: String
                 ) {
-                    Log.d(TAG, "Account registration state: $state - $message")
+                    Logger.d(TAG, "Account registration state: $state - $message")
                     handleRegistrationStateChanged(account, state, message)
                 }
 
@@ -143,16 +154,16 @@ class LinphoneService : Service() {
                     state: Call.State,
                     message: String
                 ) {
-                    Log.d(TAG, "Call state changed: $state - $message")
+                    Logger.d(TAG, "Call state changed: $state - $message")
                     handleCallStateChanged(call, state, message)
                 }
 
                 override fun onAudioDeviceChanged(core: Core, audioDevice: AudioDevice) {
-                    Log.d(TAG, "Audio device changed: ${audioDevice.deviceName}")
+                    Logger.d(TAG, "Audio device changed: ${audioDevice.deviceName}")
                 }
 
                 override fun onAudioDevicesListUpdated(core: Core) {
-                    Log.d(TAG, "Audio devices list updated")
+                    Logger.d(TAG, "Audio devices list updated")
                 }
             }
 
@@ -164,10 +175,10 @@ class LinphoneService : Service() {
             // Iniciar el Core
             core?.start()
             
-            Log.d(TAG, "Linphone Core iniciado correctamente - versión: ${core?.version}")
+            Logger.d(TAG, "Linphone Core iniciado correctamente - versión: ${core?.version}")
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error al inicializar Linphone Core", e)
+            Logger.e(TAG, "Error al inicializar Linphone Core", e)
         }
     }
 
@@ -192,29 +203,29 @@ class LinphoneService : Service() {
             // Auto-iterate habilitado por defecto en SDK 5.4+
             // El SDK maneja automáticamente el iterate() en Android
             
-            Log.d(TAG, "Core configurado correctamente")
+            Logger.d(TAG, "Core configurado correctamente")
         }
     }
 
     private fun handleGlobalStateChanged(state: GlobalState, message: String) {
         when (state) {
             GlobalState.On -> {
-                Log.i(TAG, "Linphone Core está activo y listo")
+                Logger.i(TAG, "Linphone Core está activo y listo")
             }
             GlobalState.Off -> {
-                Log.i(TAG, "Linphone Core se ha detenido")
+                Logger.i(TAG, "Linphone Core se ha detenido")
             }
             GlobalState.Startup -> {
-                Log.i(TAG, "Linphone Core iniciando...")
+                Logger.i(TAG, "Linphone Core iniciando...")
             }
             GlobalState.Shutdown -> {
-                Log.i(TAG, "Linphone Core apagándose...")
+                Logger.i(TAG, "Linphone Core apagándose...")
             }
             GlobalState.Configuring -> {
-                Log.i(TAG, "Linphone Core configurándose...")
+                Logger.i(TAG, "Linphone Core configurándose...")
             }
             GlobalState.Ready -> {
-                Log.i(TAG, "Linphone Core listo")
+                Logger.i(TAG, "Linphone Core listo")
             }
         }
     }
@@ -226,26 +237,26 @@ class LinphoneService : Service() {
     ) {
         when (state) {
             RegistrationState.Ok -> {
-                Log.i(TAG, "Cuenta registrada: ${account.params?.identityAddress?.asString()}")
+                Logger.i(TAG, "Cuenta registrada: ${account.params?.identityAddress?.asString()}")
                 updateNotification("Conectado: ${account.params?.identityAddress?.username}")
             }
             RegistrationState.Failed -> {
-                Log.e(TAG, "Registro fallido: $message")
+                Logger.e(TAG, "Registro fallido: $message")
                 updateNotification("Error de conexión")
             }
             RegistrationState.Progress -> {
-                Log.i(TAG, "Registrando...")
+                Logger.i(TAG, "Registrando...")
                 updateNotification("Conectando...")
             }
             RegistrationState.Cleared -> {
-                Log.i(TAG, "Registro limpiado")
+                Logger.i(TAG, "Registro limpiado")
                 updateNotification("Desconectado")
             }
             RegistrationState.None -> {
-                Log.i(TAG, "Sin registro")
+                Logger.i(TAG, "Sin registro")
             }
             RegistrationState.Refreshing -> {
-                Log.i(TAG, "Refrescando registro...")
+                Logger.i(TAG, "Refrescando registro...")
             }
         }
     }
@@ -255,23 +266,23 @@ class LinphoneService : Service() {
             Call.State.IncomingReceived, 
             Call.State.IncomingEarlyMedia -> {
                 val phoneNumber = call.remoteAddress?.asStringUriOnly() ?: return
-                Log.i(TAG, "Llamada entrante de: $phoneNumber")
+                Logger.i(TAG, "Llamada entrante de: $phoneNumber")
                 handleIncomingCall(call, phoneNumber)
             }
             Call.State.Connected -> {
-                Log.i(TAG, "Llamada conectada")
+                Logger.i(TAG, "Llamada conectada")
             }
             Call.State.End, 
             Call.State.Released -> {
-                Log.i(TAG, "Llamada terminada")
+                Logger.i(TAG, "Llamada terminada")
                 currentScreeningCall = null
             }
             Call.State.Error -> {
-                Log.e(TAG, "Error en llamada: $message")
+                Logger.e(TAG, "Error en llamada: $message")
                 currentScreeningCall = null
             }
             else -> {
-                Log.d(TAG, "Estado de llamada: $state")
+                Logger.d(TAG, "Estado de llamada: $state")
             }
         }
     }
@@ -282,7 +293,7 @@ class LinphoneService : Service() {
                 // 1. Verificar si está en contactos
                 if (contactsHelper.isNumberInContacts(phoneNumber)) {
                     val name = contactsHelper.getContactName(phoneNumber)
-                    Log.d(TAG, "Número en contactos: $name - ignorando")
+                    Logger.d(TAG, "Número en contactos: $name - ignorando")
                     return@launch
                 }
 
@@ -303,7 +314,7 @@ class LinphoneService : Service() {
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "Error al procesar llamada entrante", e)
+                Logger.e(TAG, "Error al procesar llamada entrante", e)
             }
         }
     }
@@ -313,7 +324,7 @@ class LinphoneService : Service() {
             // 1. Verificar caché
             val cachedResult = spamRepository.getCheckResult(phoneNumber)
             if (cachedResult != null) {
-                Log.d(TAG, "Resultado en caché para $phoneNumber")
+                Logger.d(TAG, "Resultado en caché para $phoneNumber")
                 showSpamWarningScreen(
                     phoneNumber, 
                     cachedResult.isSpam, 
@@ -324,7 +335,7 @@ class LinphoneService : Service() {
             }
 
             // 2. Consultar Gemini
-            Log.d(TAG, "Consultando Gemini para: $phoneNumber")
+            Logger.d(TAG, "Consultando Gemini para: $phoneNumber")
             val result = withContext(Dispatchers.IO) {
                 geminiService.checkIfSpam(phoneNumber)
             }
@@ -343,7 +354,7 @@ class LinphoneService : Service() {
             showSpamNotification(phoneNumber, result.isSpam, result.reason)
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error en detección de spam", e)
+            Logger.e(TAG, "Error en detección de spam", e)
         }
     }
 
@@ -359,7 +370,7 @@ class LinphoneService : Service() {
             }
             
             call.acceptWithParams(callParams)
-            Log.d(TAG, "Llamada auto-contestada para screening")
+            Logger.d(TAG, "Llamada auto-contestada para screening")
 
             // Mostrar overlay de screening
             showScreeningOverlay(phoneNumber)
@@ -371,12 +382,12 @@ class LinphoneService : Service() {
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error al auto-contestar llamada", e)
+            Logger.e(TAG, "Error al auto-contestar llamada", e)
         }
     }
 
     private fun handleScreeningCompleted(name: String?, purpose: String?, phoneNumber: String) {
-        Log.d(TAG, "Screening completado - Name: $name, Purpose: $purpose")
+        Logger.d(TAG, "Screening completado - Name: $name, Purpose: $purpose")
 
         val intent = Intent(ScreeningOverlayActivity.ACTION_UPDATE_SCREENING).apply {
             putExtra(ScreeningOverlayActivity.EXTRA_CALLER_NAME, name)
@@ -561,11 +572,11 @@ class LinphoneService : Service() {
             // Establecer como cuenta por defecto
             core.defaultAccount = account
 
-            Log.i(TAG, "Cuenta creada y registrando: $username@$domain")
+            Logger.i(TAG, "Cuenta creada y registrando: $username@$domain")
             true
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error al crear cuenta", e)
+            Logger.e(TAG, "Error al crear cuenta", e)
             false
         }
     }
@@ -576,13 +587,48 @@ class LinphoneService : Service() {
     fun clearAccounts() {
         core?.clearAccounts()
         core?.clearAllAuthInfo()
-        Log.i(TAG, "Todas las cuentas eliminadas")
+        Logger.i(TAG, "Todas las cuentas eliminadas")
+    }
+
+    /**
+     * Configura la cuenta SIP automáticamente si hay credenciales guardadas
+     */
+    private fun configureSipAccountIfAvailable() {
+        try {
+            val prefs = getSharedPreferences("settings", Context.MODE_PRIVATE)
+            val sipConfigured = prefs.getBoolean("sip_configured", false)
+            
+            if (!sipConfigured) {
+                Logger.i(TAG, "No hay configuración SIP guardada")
+                return
+            }
+            
+            val username = prefs.getString("sip_username", "") ?: ""
+            val password = prefs.getString("sip_password", "") ?: ""
+            val domain = prefs.getString("sip_domain", "") ?: ""
+            
+            if (username.isBlank() || password.isBlank() || domain.isBlank()) {
+                Logger.w(TAG, "Configuración SIP incompleta")
+                return
+            }
+            
+            Logger.i(TAG, "Configurando cuenta SIP: $username@$domain")
+            val success = createAndRegisterAccount(username, password, domain)
+            
+            if (success) {
+                Logger.i(TAG, "Cuenta SIP configurada exitosamente")
+            } else {
+                Logger.e(TAG, "Error al configurar cuenta SIP")
+            }
+        } catch (e: Exception) {
+            Logger.e(TAG, "Excepción al configurar cuenta SIP", e)
+        }
     }
 
     // endregion
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand")
+        Logger.d(TAG, "onStartCommand")
         return START_STICKY
     }
 
@@ -590,7 +636,7 @@ class LinphoneService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "LinphoneService onDestroy")
+        Logger.d(TAG, "LinphoneService onDestroy")
 
         isRunning = false
 
@@ -601,7 +647,7 @@ class LinphoneService : Service() {
         try {
             unregisterReceiver(callActionReceiver)
         } catch (e: Exception) {
-            Log.e(TAG, "Error unregistering receiver", e)
+            Logger.e(TAG, "Error unregistering receiver", e)
         }
 
         // Limpiar call screening service

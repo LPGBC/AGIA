@@ -1,4 +1,5 @@
 package com.luisspamdetector.service
+import com.luisspamdetector.util.Logger
 
 import android.content.Context
 import android.content.Intent
@@ -8,7 +9,6 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import android.util.Log
 import com.luisspamdetector.api.GeminiApiService
 import kotlinx.coroutines.*
 import org.linphone.core.Call
@@ -69,7 +69,7 @@ class CallScreeningService(
                 initializeTTS()
                 initializeSpeechRecognizer()
             } catch (e: Exception) {
-                Log.e(TAG, "Error initializing screening service", e)
+                Logger.e(TAG, "Error initializing screening service", e)
                 screeningCallback?.onScreeningFailed("Error de inicialización: ${e.message}")
             }
         }
@@ -81,7 +81,7 @@ class CallScreeningService(
                 val result = tts?.setLanguage(Locale("es", "ES"))
                 
                 if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    Log.w(TAG, "Idioma español no disponible, usando predeterminado")
+                    Logger.w(TAG, "Idioma español no disponible, usando predeterminado")
                     tts?.setLanguage(Locale.getDefault())
                 }
 
@@ -90,34 +90,34 @@ class CallScreeningService(
 
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
-                        Log.d(TAG, "TTS started: $utteranceId")
+                        Logger.d(TAG, "TTS started: $utteranceId")
                     }
 
                     override fun onDone(utteranceId: String?) {
-                        Log.d(TAG, "TTS done: $utteranceId")
+                        Logger.d(TAG, "TTS done: $utteranceId")
                         handleTTSCompleted(utteranceId)
                     }
 
                     @Deprecated("Deprecated in Java")
                     override fun onError(utteranceId: String?) {
-                        Log.e(TAG, "TTS error: $utteranceId")
+                        Logger.e(TAG, "TTS error: $utteranceId")
                         handleTTSError(utteranceId)
                     }
 
                     override fun onError(utteranceId: String?, errorCode: Int) {
-                        Log.e(TAG, "TTS error: $utteranceId, code: $errorCode")
+                        Logger.e(TAG, "TTS error: $utteranceId, code: $errorCode")
                         handleTTSError(utteranceId)
                     }
                 })
 
                 isInitialized = true
-                Log.d(TAG, "TTS initialized successfully")
+                Logger.d(TAG, "TTS initialized successfully")
                 
                 if (continuation.isActive) {
                     continuation.resumeWith(Result.success(Unit))
                 }
             } else {
-                Log.e(TAG, "TTS initialization failed with status: $status")
+                Logger.e(TAG, "TTS initialization failed with status: $status")
                 if (continuation.isActive) {
                     continuation.resumeWith(Result.failure(
                         Exception("TTS initialization failed")
@@ -139,14 +139,14 @@ class CallScreeningService(
 
     private fun initializeSpeechRecognizer() {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            Log.e(TAG, "Speech recognition not available")
+            Logger.e(TAG, "Speech recognition not available")
             screeningCallback?.onScreeningFailed("Reconocimiento de voz no disponible")
             return
         }
 
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
         speechRecognizer?.setRecognitionListener(createRecognitionListener())
-        Log.d(TAG, "SpeechRecognizer initialized")
+        Logger.d(TAG, "SpeechRecognizer initialized")
     }
 
     /**
@@ -154,7 +154,7 @@ class CallScreeningService(
      */
     fun startScreening(call: Call, phoneNumber: String) {
         if (!isInitialized) {
-            Log.e(TAG, "Service not initialized")
+            Logger.e(TAG, "Service not initialized")
             screeningCallback?.onScreeningFailed("Servicio no inicializado")
             return
         }
@@ -165,7 +165,7 @@ class CallScreeningService(
         currentCall = call
         conversationState = ConversationState.GREETING
 
-        Log.d(TAG, "Starting screening for: $phoneNumber")
+        Logger.d(TAG, "Starting screening for: $phoneNumber")
 
         // Esperar a que la llamada se establezca
         scope.launch {
@@ -176,7 +176,7 @@ class CallScreeningService(
                 call.state == Call.State.Connected) {
                 greetCaller()
             } else {
-                Log.w(TAG, "Call no longer active, state: ${call.state}")
+                Logger.w(TAG, "Call no longer active, state: ${call.state}")
                 conversationState = ConversationState.ERROR
             }
         }
@@ -204,7 +204,7 @@ class CallScreeningService(
     }
 
     private fun speak(text: String, utteranceId: String) {
-        Log.d(TAG, "Speaking: $text")
+        Logger.d(TAG, "Speaking: $text")
         
         val params = Bundle().apply {
             putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
@@ -232,7 +232,7 @@ class CallScreeningService(
     }
 
     private fun handleTTSError(utteranceId: String?) {
-        Log.e(TAG, "TTS error for: $utteranceId")
+        Logger.e(TAG, "TTS error for: $utteranceId")
         // Intentar continuar de todos modos
         handleTTSCompleted(utteranceId)
     }
@@ -245,14 +245,14 @@ class CallScreeningService(
         // Timeout para escuchar
         listeningJob = scope.launch {
             delay(LISTEN_TIMEOUT_MS)
-            Log.d(TAG, "Listening timeout reached")
+            Logger.d(TAG, "Listening timeout reached")
             speechRecognizer?.stopListening()
             handleNoResponse()
         }
     }
 
     private fun startListening() {
-        Log.d(TAG, "Starting to listen...")
+        Logger.d(TAG, "Starting to listen...")
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(
@@ -278,18 +278,18 @@ class CallScreeningService(
         try {
             speechRecognizer?.startListening(intent)
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting speech recognition", e)
+            Logger.e(TAG, "Error starting speech recognition", e)
             handleNoResponse()
         }
     }
 
     private fun createRecognitionListener() = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
-            Log.d(TAG, "Ready for speech")
+            Logger.d(TAG, "Ready for speech")
         }
 
         override fun onBeginningOfSpeech() {
-            Log.d(TAG, "Beginning of speech")
+            Logger.d(TAG, "Beginning of speech")
             // Cancelar timeout ya que el usuario está hablando
             listeningJob?.cancel()
         }
@@ -303,7 +303,7 @@ class CallScreeningService(
         }
 
         override fun onEndOfSpeech() {
-            Log.d(TAG, "End of speech")
+            Logger.d(TAG, "End of speech")
         }
 
         override fun onError(error: Int) {
@@ -319,7 +319,7 @@ class CallScreeningService(
                 SpeechRecognizer.ERROR_SERVER -> "Server error"
                 else -> "Unknown error: $error"
             }
-            Log.e(TAG, "Speech recognition error: $errorMessage")
+            Logger.e(TAG, "Speech recognition error: $errorMessage")
             
             listeningJob?.cancel()
 
@@ -342,7 +342,7 @@ class CallScreeningService(
 
             if (!matches.isNullOrEmpty()) {
                 val recognized = matches[0]
-                Log.d(TAG, "Recognized: $recognized")
+                Logger.d(TAG, "Recognized: $recognized")
                 handleRecognizedSpeech(recognized)
             } else {
                 handleNoResponse()
@@ -352,12 +352,12 @@ class CallScreeningService(
         override fun onPartialResults(partialResults: Bundle?) {
             val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
             if (!matches.isNullOrEmpty()) {
-                Log.d(TAG, "Partial: ${matches[0]}")
+                Logger.d(TAG, "Partial: ${matches[0]}")
             }
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) {
-            Log.d(TAG, "Recognition event: $eventType")
+            Logger.d(TAG, "Recognition event: $eventType")
         }
     }
 
@@ -365,38 +365,38 @@ class CallScreeningService(
         when (conversationState) {
             ConversationState.WAITING_NAME -> {
                 callerName = text
-                Log.d(TAG, "Caller name captured: $callerName")
+                Logger.d(TAG, "Caller name captured: $callerName")
 
                 scope.launch {
                     try {
                         callerName = enhanceNameWithGemini(text)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error enhancing name", e)
+                        Logger.e(TAG, "Error enhancing name", e)
                     }
                     askPurpose()
                 }
             }
             ConversationState.WAITING_PURPOSE -> {
                 callerPurpose = text
-                Log.d(TAG, "Caller purpose captured: $callerPurpose")
+                Logger.d(TAG, "Caller purpose captured: $callerPurpose")
 
                 scope.launch {
                     try {
                         callerPurpose = enhancePurposeWithGemini(text)
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error enhancing purpose", e)
+                        Logger.e(TAG, "Error enhancing purpose", e)
                     }
                     finishScreening()
                 }
             }
             else -> {
-                Log.w(TAG, "Unexpected conversation state: $conversationState")
+                Logger.w(TAG, "Unexpected conversation state: $conversationState")
             }
         }
     }
 
     private fun handleNoResponse() {
-        Log.d(TAG, "No response detected in state: $conversationState")
+        Logger.d(TAG, "No response detected in state: $conversationState")
 
         when (conversationState) {
             ConversationState.WAITING_NAME -> {
@@ -428,7 +428,7 @@ class CallScreeningService(
                 val result = geminiService.askGemini(prompt)
                 result.ifBlank { rawName }.take(50) // Limitar longitud
             } catch (e: Exception) {
-                Log.e(TAG, "Error in enhanceNameWithGemini", e)
+                Logger.e(TAG, "Error in enhanceNameWithGemini", e)
                 rawName
             }
         }
@@ -449,7 +449,7 @@ class CallScreeningService(
                 val result = geminiService.askGemini(prompt)
                 result.ifBlank { rawPurpose }.take(200) // Limitar longitud
             } catch (e: Exception) {
-                Log.e(TAG, "Error in enhancePurposeWithGemini", e)
+                Logger.e(TAG, "Error in enhancePurposeWithGemini", e)
                 rawPurpose
             }
         }
@@ -460,7 +460,7 @@ class CallScreeningService(
 
         val phoneNumber = currentCall?.remoteAddress?.asStringUriOnly() ?: "Desconocido"
 
-        Log.d(TAG, "Screening completed - Name: $callerName, Purpose: $callerPurpose")
+        Logger.d(TAG, "Screening completed - Name: $callerName, Purpose: $callerPurpose")
 
         screeningCallback?.onScreeningCompleted(
             callerName ?: "Desconocido",
@@ -480,7 +480,7 @@ class CallScreeningService(
                     call.resume()
                 }
                 else -> {
-                    Log.d(TAG, "Call in state ${call.state}, no action needed")
+                    Logger.d(TAG, "Call in state ${call.state}, no action needed")
                 }
             }
         }
@@ -504,7 +504,7 @@ class CallScreeningService(
     }
 
     fun shutdown() {
-        Log.d(TAG, "Shutting down CallScreeningService")
+        Logger.d(TAG, "Shutting down CallScreeningService")
         
         scope.cancel()
         
@@ -514,14 +514,14 @@ class CallScreeningService(
             speechRecognizer?.cancel()
             speechRecognizer?.destroy()
         } catch (e: Exception) {
-            Log.e(TAG, "Error destroying speech recognizer", e)
+            Logger.e(TAG, "Error destroying speech recognizer", e)
         }
         
         try {
             tts?.stop()
             tts?.shutdown()
         } catch (e: Exception) {
-            Log.e(TAG, "Error shutting down TTS", e)
+            Logger.e(TAG, "Error shutting down TTS", e)
         }
         
         speechRecognizer = null

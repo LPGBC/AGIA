@@ -1,7 +1,7 @@
 package com.luisspamdetector
 
 import android.app.Application
-import android.util.Log
+import com.luisspamdetector.util.Logger
 import org.linphone.core.Factory
 import org.linphone.core.LogCollectionState
 import org.linphone.core.LogLevel
@@ -17,7 +17,10 @@ class SpamDetectorApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Application onCreate")
+        
+        // Inicializar sistema de logging
+        Logger.initialize(this)
+        Logger.d(TAG, "Application onCreate")
 
         initializeLinphoneFactory()
     }
@@ -37,10 +40,10 @@ class SpamDetectorApp : Application() {
                 if (BuildConfig.DEBUG) LogLevel.Debug else LogLevel.Warning
             )
 
-            Log.i(TAG, "Linphone Factory initialized successfully")
+            Logger.i(TAG, "Linphone Factory initialized successfully")
             
         } catch (e: Exception) {
-            Log.e(TAG, "Error initializing Linphone Factory", e)
+            Logger.e(TAG, "Error initializing Linphone Factory", e)
         }
     }
 }
