@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -26,6 +27,8 @@ class GeminiApiService(private var apiKey: String) {
         private const val MODEL = "gemini-2.0-flash-exp"
         private const val TIMEOUT_SECONDS = 60L // Más tiempo para audio
         private const val MAX_AUDIO_SIZE_MB = 20 // Límite de tamaño de audio
+        private const val MAX_RETRIES = 3 // Número máximo de reintentos
+        private const val INITIAL_DELAY_MS = 2000L // Delay inicial para backoff
     }
 
     private val client = OkHttpClient.Builder()
@@ -91,7 +94,8 @@ class GeminiApiService(private var apiKey: String) {
                 
                 Log.i(TAG, "Transcribiendo audio: ${audioFile.name}, tamaño: ${fileSizeMB}MB, tipo: $mimeType")
                 
-                val response = makeAudioApiRequest(audioBase64, mimeType, phoneNumber)
+                // Intentar con reintentos en caso de error 429
+                val response = makeAudioApiRequestWithRetry(audioBase64, mimeType, phoneNumber)
                 parseTranscriptionResponse(response)
                 
             } catch (e: Exception) {
@@ -104,6 +108,34 @@ class GeminiApiService(private var apiKey: String) {
                 )
             }
         }
+    }
+    
+    /**
+     * Hace una solicitud a la API con reintentos para manejar errores 429
+     */
+    private suspend fun makeAudioApiRequestWithRetry(audioBase64: String, mimeType: String, phoneNumber: String): String {
+        var lastException: Exception? = null
+        var delayMs = INITIAL_DELAY_MS
+        
+        repeat(MAX_RETRIES) { attempt ->
+            try {
+                Log.d(TAG, "Intento ${attempt + 1} de $MAX_RETRIES")
+                return makeAudioApiRequest(audioBase64, mimeType, phoneNumber)
+            } catch (e: IOException) {
+                lastException = e
+                // Si es error 429 (rate limit), esperar y reintentar
+                if (e.message?.contains("429") == true) {
+                    Log.w(TAG, "Rate limit alcanzado (429), esperando ${delayMs}ms antes de reintentar...")
+                    delay(delayMs)
+                    delayMs *= 2 // Backoff exponencial
+                } else {
+                    // Para otros errores, no reintentar
+                    throw e
+                }
+            }
+        }
+        
+        throw lastException ?: IOException("Error desconocido después de $MAX_RETRIES intentos")
     }
     
     /**
