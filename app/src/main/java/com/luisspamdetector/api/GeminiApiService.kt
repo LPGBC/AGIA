@@ -116,25 +116,30 @@ class GeminiApiService(private var apiKey: String) {
 
         val url = "$BASE_URL/$MODEL:generateContent?key=$apiKey"
         
-        val prompt = """
-            Escucha atentamente este audio de una llamada telefónica y proporciona:
-            1. Una transcripción completa de todo lo que se dice en el audio
-            2. Un resumen breve del motivo de la llamada
-            3. Análisis de si parece ser spam/telemarketing/estafa
-            
-            Número de teléfono del llamante: $phoneNumber
-            
-            Responde EXACTAMENTE en este formato JSON (sin markdown, sin ```):
-            {
-                "transcripcion": "transcripción completa palabra por palabra de lo que se dice en el audio",
-                "resumen": "resumen breve en 1-2 líneas del motivo de la llamada",
-                "es_spam": true/false,
-                "confianza_spam": 0.0-1.0,
-                "idioma_detectado": "español/inglés/otro"
-            }
-            
-            Si el audio está vacío, en silencio o es inaudible, indica "Audio sin contenido audible" en la transcripción.
-        """.trimIndent()
+        val prompt = buildString {
+            append("Escucha atentamente este audio de una llamada telefónica y proporciona: ")
+            append("1. Una transcripción completa de todo lo que se dice en el audio. ")
+            append("2. Un resumen breve del motivo de la llamada. ")
+            append("3. Análisis de si parece ser spam/telemarketing/estafa. ")
+            append("Número de teléfono del llamante: $phoneNumber. ")
+            append("Responde EXACTAMENTE en este formato JSON sin markdown: ")
+            append("{")
+            append("transcripcion: transcripción completa palabra por palabra, ")
+            append("resumen: resumen breve en 1-2 líneas, ")
+            append("es_spam: true o false, ")
+            append("confianza_spam: número entre 0.0 y 1.0, ")
+            append("idioma_detectado: español o inglés u otro")
+            append("}. ")
+            append("Si el audio está vacío o en silencio indica Audio sin contenido audible en la transcripción.")
+        }
+        
+        // Escapar el prompt para JSON
+        val escapedPrompt = prompt
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
         
         // Crear el request body con audio inline
         val requestJson = """
@@ -148,7 +153,7 @@ class GeminiApiService(private var apiKey: String) {
                             }
                         },
                         {
-                            "text": "$prompt"
+                            "text": "$escapedPrompt"
                         }
                     ]
                 }],
