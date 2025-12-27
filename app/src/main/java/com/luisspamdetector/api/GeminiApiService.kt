@@ -1,5 +1,6 @@
 package com.luisspamdetector.api
 
+import android.util.Base64
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
@@ -9,6 +10,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -22,7 +24,8 @@ class GeminiApiService(private var apiKey: String) {
         private const val TAG = "GeminiApiService"
         private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
         private const val MODEL = "gemini-2.0-flash-exp"
-        private const val TIMEOUT_SECONDS = 30L
+        private const val TIMEOUT_SECONDS = 60L // Más tiempo para audio
+        private const val MAX_AUDIO_SIZE_MB = 20 // Límite de tamaño de audio
     }
 
     private val client = OkHttpClient.Builder()
@@ -39,6 +42,182 @@ class GeminiApiService(private var apiKey: String) {
     }
 
     fun hasValidApiKey(): Boolean = apiKey.isNotBlank()
+
+    /**
+     * Transcribe un archivo de audio y genera un resumen
+     * @param audioPath Ruta al archivo de audio (WAV, MP3, etc.)
+     * @param phoneNumber Número de teléfono para contexto
+     * @return TranscriptionResult con transcripción, resumen e info de spam
+     */
+    suspend fun transcribeAudio(audioPath: String, phoneNumber: String): TranscriptionResult {
+        return withContext(Dispatchers.IO) {
+            try {
+                val audioFile = File(audioPath)
+                if (!audioFile.exists()) {
+                    Log.e(TAG, "Archivo de audio no encontrado: $audioPath")
+                    return@withContext TranscriptionResult(
+                        transcription = "Archivo de audio no encontrado",
+                        summary = "Error al procesar",
+                        isSpam = false,
+                        spamConfidence = 0.0
+                    )
+                }
+                
+                // Verificar tamaño del archivo
+                val fileSizeMB = audioFile.length() / (1024 * 1024)
+                if (fileSizeMB > MAX_AUDIO_SIZE_MB) {
+                    Log.w(TAG, "Archivo de audio muy grande: ${fileSizeMB}MB")
+                    return@withContext TranscriptionResult(
+                        transcription = "Archivo de audio demasiado grande para procesar",
+                        summary = "Audio muy largo",
+                        isSpam = false,
+                        spamConfidence = 0.0
+                    )
+                }
+                
+                // Leer y codificar el audio en base64
+                val audioBytes = audioFile.readBytes()
+                val audioBase64 = Base64.encodeToString(audioBytes, Base64.NO_WRAP)
+                
+                // Determinar el tipo MIME
+                val mimeType = when {
+                    audioPath.endsWith(".wav", ignoreCase = true) -> "audio/wav"
+                    audioPath.endsWith(".mp3", ignoreCase = true) -> "audio/mp3"
+                    audioPath.endsWith(".m4a", ignoreCase = true) -> "audio/mp4"
+                    audioPath.endsWith(".ogg", ignoreCase = true) -> "audio/ogg"
+                    audioPath.endsWith(".flac", ignoreCase = true) -> "audio/flac"
+                    else -> "audio/wav" // Default
+                }
+                
+                Log.i(TAG, "Transcribiendo audio: ${audioFile.name}, tamaño: ${fileSizeMB}MB, tipo: $mimeType")
+                
+                val response = makeAudioApiRequest(audioBase64, mimeType, phoneNumber)
+                parseTranscriptionResponse(response)
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error transcribiendo audio", e)
+                TranscriptionResult(
+                    transcription = "Error al transcribir: ${e.message}",
+                    summary = "Error de transcripción",
+                    isSpam = false,
+                    spamConfidence = 0.0
+                )
+            }
+        }
+    }
+    
+    /**
+     * Hace una solicitud a la API con audio incluido
+     */
+    private fun makeAudioApiRequest(audioBase64: String, mimeType: String, phoneNumber: String): String {
+        if (apiKey.isBlank()) {
+            throw IllegalStateException("API key no configurada")
+        }
+
+        val url = "$BASE_URL/$MODEL:generateContent?key=$apiKey"
+        
+        val prompt = """
+            Escucha atentamente este audio de una llamada telefónica y proporciona:
+            1. Una transcripción completa de todo lo que se dice en el audio
+            2. Un resumen breve del motivo de la llamada
+            3. Análisis de si parece ser spam/telemarketing/estafa
+            
+            Número de teléfono del llamante: $phoneNumber
+            
+            Responde EXACTAMENTE en este formato JSON (sin markdown, sin ```):
+            {
+                "transcripcion": "transcripción completa palabra por palabra de lo que se dice en el audio",
+                "resumen": "resumen breve en 1-2 líneas del motivo de la llamada",
+                "es_spam": true/false,
+                "confianza_spam": 0.0-1.0,
+                "idioma_detectado": "español/inglés/otro"
+            }
+            
+            Si el audio está vacío, en silencio o es inaudible, indica "Audio sin contenido audible" en la transcripción.
+        """.trimIndent()
+        
+        // Crear el request body con audio inline
+        val requestJson = """
+            {
+                "contents": [{
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mime_type": "$mimeType",
+                                "data": "$audioBase64"
+                            }
+                        },
+                        {
+                            "text": "$prompt"
+                        }
+                    ]
+                }],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 2048
+                }
+            }
+        """.trimIndent()
+        
+        val mediaType = "application/json".toMediaType()
+        val body = requestJson.toRequestBody(mediaType)
+
+        val request = Request.Builder()
+            .url(url)
+            .post(body)
+            .addHeader("Content-Type", "application/json")
+            .build()
+
+        val response = client.newCall(request).execute()
+
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: "Unknown error"
+            Log.e(TAG, "API error transcribiendo audio: ${response.code} - $errorBody")
+            throw IOException("API error: ${response.code} - $errorBody")
+        }
+
+        val responseBody = response.body?.string() ?: throw IOException("Empty response")
+        return extractTextFromResponse(responseBody)
+    }
+    
+    /**
+     * Parsea la respuesta de transcripción
+     */
+    private fun parseTranscriptionResponse(response: String): TranscriptionResult {
+        return try {
+            val cleanJson = response
+                .replace("```json", "")
+                .replace("```", "")
+                .trim()
+            
+            val jsonMatch = Regex("""\{[\s\S]*\}""").find(cleanJson)
+            if (jsonMatch != null) {
+                val json = org.json.JSONObject(jsonMatch.value)
+                TranscriptionResult(
+                    transcription = json.optString("transcripcion", "Sin transcripción"),
+                    summary = json.optString("resumen", "Sin resumen"),
+                    isSpam = json.optBoolean("es_spam", false),
+                    spamConfidence = json.optDouble("confianza_spam", 0.0)
+                )
+            } else {
+                // Si no es JSON, usar la respuesta como transcripción
+                TranscriptionResult(
+                    transcription = response.take(1000),
+                    summary = response.take(100),
+                    isSpam = false,
+                    spamConfidence = 0.0
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parseando respuesta de transcripción: $response", e)
+            TranscriptionResult(
+                transcription = response.take(1000),
+                summary = "Error al procesar respuesta",
+                isSpam = false,
+                spamConfidence = 0.0
+            )
+        }
+    }
 
     /**
      * Verifica si un número de teléfono es probable spam
@@ -260,6 +439,16 @@ class GeminiApiService(private var apiKey: String) {
         val riskLevel: RiskLevel,
         val summary: String,
         val recommendation: String
+    )
+
+    /**
+     * Resultado de la transcripción de audio
+     */
+    data class TranscriptionResult(
+        val transcription: String,
+        val summary: String,
+        val isSpam: Boolean,
+        val spamConfidence: Double
     )
 
     enum class RiskLevel {

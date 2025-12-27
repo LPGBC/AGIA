@@ -1508,6 +1508,24 @@ fun ScreeningHistoryItem(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
                 
+                // Summary (resumen breve)
+                if (!item.summary.isNullOrBlank()) {
+                    Text(
+                        text = "Resumen:",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = item.summary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                
                 // Transcription
                 Text(
                     text = "Transcripción:",

@@ -595,49 +595,15 @@ class LinphoneService : Service() {
         try {
             Logger.i(TAG, "Transcribiendo grabación silenciosa: $recordingPath")
             
-            // Analizar basándose en el número y generar transcripción + resumen
-            var transcriptionText = "Llamada grabada - pendiente de análisis"
-            var summaryText = "Pendiente de análisis"
-            var isSpam = false
-            var spamConfidence = 0.0
+            // Transcribir el audio real usando Gemini
+            val result = geminiService.transcribeAudio(recordingPath, phoneNumber)
             
-            withContext(Dispatchers.IO) {
-                try {
-                    val prompt = """
-                        Analiza este número de teléfono y proporciona información detallada:
-                        - Número: $phoneNumber
-                        
-                        Responde SOLO con este JSON (sin markdown):
-                        {
-                            "transcripcion": "descripción detallada de la llamada y lo que se dijo",
-                            "resumen": "resumen muy breve en 1-2 líneas del motivo de la llamada",
-                            "es_spam": true/false,
-                            "confianza": 0.0-1.0
-                        }
-                    """.trimIndent()
-                    val response = geminiService.askGemini(prompt)
-                    
-                    // Parsear respuesta JSON
-                    try {
-                        val jsonMatch = Regex("""\{[^}]+\}""", RegexOption.DOT_MATCHES_ALL).find(response)
-                        if (jsonMatch != null) {
-                            val json = org.json.JSONObject(jsonMatch.value)
-                            transcriptionText = json.optString("transcripcion", "Llamada grabada")
-                            summaryText = json.optString("resumen", "Llamada entrante")
-                            isSpam = json.optBoolean("es_spam", false)
-                            spamConfidence = json.optDouble("confianza", 0.5)
-                        } else {
-                            transcriptionText = response.take(200)
-                            summaryText = "Llamada entrante"
-                        }
-                    } catch (e: Exception) {
-                        transcriptionText = response.take(200)
-                        summaryText = "Llamada entrante"
-                    }
-                } catch (e: Exception) {
-                    Logger.e(TAG, "Error al analizar con Gemini", e)
-                }
-            }
+            val transcriptionText = result.transcription
+            val summaryText = result.summary
+            val isSpam = result.isSpam
+            val spamConfidence = result.spamConfidence
+            
+            Logger.i(TAG, "Transcripción completada: ${transcriptionText.take(100)}...")
             
             // Calcular duración del archivo de audio
             val duration = try {
@@ -688,51 +654,29 @@ class LinphoneService : Service() {
         try {
             Logger.i(TAG, "Transcribiendo grabación: $recordingPath")
             
-            // Analizar si es spam usando Gemini y generar transcripción + resumen
-            var transcriptionText = "Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}"
-            var summaryText = purpose ?: "Llamada entrante"
-            var isSpam = false
-            var spamConfidence = 0.0
+            // Transcribir el audio real usando Gemini
+            val result = geminiService.transcribeAudio(recordingPath, phoneNumber)
             
-            withContext(Dispatchers.IO) {
-                try {
-                    val prompt = """
-                        Analiza esta llamada filtrada y proporciona información detallada:
-                        - Número: $phoneNumber
-                        - Nombre del llamante: ${name ?: "Desconocido"}
-                        - Motivo declarado: ${purpose ?: "No especificado"}
-                        
-                        Responde SOLO con este JSON (sin markdown):
-                        {
-                            "transcripcion": "descripción detallada de la llamada incluyendo lo que el llamante dijo o pretendía",
-                            "resumen": "resumen muy breve en 1-2 líneas del motivo de la llamada",
-                            "es_spam": true/false,
-                            "confianza": 0.0-1.0
-                        }
-                    """.trimIndent()
-                    val response = geminiService.askGemini(prompt)
-                    
-                    // Parsear respuesta JSON
-                    try {
-                        val jsonMatch = Regex("""\{[^}]+\}""", RegexOption.DOT_MATCHES_ALL).find(response)
-                        if (jsonMatch != null) {
-                            val json = org.json.JSONObject(jsonMatch.value)
-                            transcriptionText = json.optString("transcripcion", "Llamada de ${name ?: "desconocido"}")
-                            summaryText = json.optString("resumen", purpose ?: "Llamada entrante")
-                            isSpam = json.optBoolean("es_spam", false)
-                            spamConfidence = json.optDouble("confianza", 0.5)
-                        } else {
-                            transcriptionText = response.take(200)
-                            summaryText = purpose ?: "Llamada entrante"
-                        }
-                    } catch (e: Exception) {
-                        transcriptionText = response.take(200)
-                        summaryText = purpose ?: "Llamada entrante"
-                    }
-                } catch (e: Exception) {
-                    Logger.e(TAG, "Error al analizar con Gemini", e)
-                }
+            // Si la transcripción falla o está vacía, usar los datos del screening
+            val transcriptionText = if (result.transcription.isNotBlank() && 
+                !result.transcription.contains("no encontrado", ignoreCase = true) &&
+                !result.transcription.contains("error", ignoreCase = true)) {
+                result.transcription
+            } else {
+                "Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}"
             }
+            
+            val summaryText = if (result.summary.isNotBlank() && 
+                !result.summary.contains("error", ignoreCase = true)) {
+                result.summary
+            } else {
+                purpose ?: "Llamada entrante"
+            }
+            
+            val isSpam = result.isSpam
+            val spamConfidence = result.spamConfidence
+            
+            Logger.i(TAG, "Transcripción completada: ${transcriptionText.take(100)}...")
             
             // Calcular duración del archivo de audio (aproximado)
             val duration = try {
