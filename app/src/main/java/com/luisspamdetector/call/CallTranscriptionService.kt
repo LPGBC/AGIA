@@ -132,6 +132,7 @@ class CallTranscriptionService(
         } catch (e: Exception) {
             Logger.e(TAG, "Error consultando spam", e)
             GeminiApiService.SpamCheckResult(
+                phoneNumber = phoneNumber,
                 isSpam = false,
                 confidence = 0.0,
                 reason = "Error al verificar"

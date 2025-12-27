@@ -237,8 +237,16 @@ class LinphoneService : Service() {
             isNativeRingingEnabled = false
             ringDuringIncomingEarlyMedia = false
             
+            // IMPORTANTE: Configuración para grabación de llamadas
+            // Asegurar que se graben ambos lados del audio
+            // El archivo de grabación se establece por llamada en handleCallScreening
+            
             // Configuración de red
             setUserAgent("LinphoneSpamDetector", "2.0")
+            
+            // Configurar transportes SIP - usar los puertos por defecto
+            // -1 significa puerto aleatorio, 0 significa deshabilitado
+            Logger.d(TAG, "Transportes SIP disponibles")
             
             // Habilitar IPv6 si está disponible
             isIpv6Enabled = true
@@ -249,10 +257,19 @@ class LinphoneService : Service() {
                 stunServer = "stun.linphone.org"
             }
             
+            // Configuración de codecs para mejor calidad de grabación
+            // Priorizar OPUS que tiene buena calidad para voz
+            audioPayloadTypes.forEach { payloadType ->
+                if (payloadType.mimeType.contains("opus", ignoreCase = true)) {
+                    payloadType.enable(true)
+                    Logger.d(TAG, "Codec OPUS habilitado")
+                }
+            }
+            
             // Auto-iterate habilitado por defecto en SDK 5.4+
             // El SDK maneja automáticamente el iterate() en Android
             
-            Logger.d(TAG, "Core configurado correctamente")
+            Logger.d(TAG, "Core configurado correctamente para grabación")
         }
     }
 
@@ -429,6 +446,7 @@ class LinphoneService : Service() {
 
     private fun handleCallScreening(call: Call, phoneNumber: String) {
         currentScreeningCall = call
+        val recordingPath = getCallRecordingPath(phoneNumber)
 
         try {
             // Configurar parámetros para grabar la llamada
@@ -436,21 +454,41 @@ class LinphoneService : Service() {
             callParams?.apply {
                 isAudioEnabled = true
                 isVideoEnabled = false
-                // Configurar archivo de grabación
-                recordFile = getCallRecordingPath(phoneNumber)
+                // Configurar archivo de grabación - IMPORTANTE: debe ser .wav para Linphone
+                recordFile = recordingPath
             }
+            
+            // También configurar en el Core para asegurar que se grabe
+            core?.recordFile = recordingPath
+            Logger.i(TAG, "Archivo de grabación configurado: $recordingPath")
             
             call.acceptWithParams(callParams)
             Logger.d(TAG, "Llamada auto-contestada para screening silencioso")
 
-            // Configurar audio silencioso y empezar grabación
+            // Configurar audio y empezar grabación cuando la llamada esté activa
             serviceScope.launch {
-                delay(300) // Esperar a que se establezca el audio
+                // Esperar a que la llamada esté en estado StreamsRunning
+                var attempts = 0
+                while (call.state != Call.State.StreamsRunning && attempts < 20) {
+                    delay(100)
+                    attempts++
+                }
+                
+                Logger.i(TAG, "Estado de llamada después de espera: ${call.state}")
+                
+                // Configurar audio silencioso (sin afectar la grabación)
                 configureAudioForSilentScreening(call)
                 
-                // Iniciar grabación de la llamada
-                call.startRecording()
-                Logger.i(TAG, "Grabación de llamada iniciada: ${callParams?.recordFile}")
+                // Iniciar grabación de la llamada - DEBE estar en StreamsRunning
+                if (call.state == Call.State.StreamsRunning) {
+                    call.startRecording()
+                    Logger.i(TAG, "✓ Grabación de llamada iniciada: $recordingPath")
+                    Logger.i(TAG, "  - isRecording: ${call.params?.isRecording}")
+                    Logger.i(TAG, "  - recordFile: ${call.params?.recordFile}")
+                } else {
+                    Logger.w(TAG, "Llamada no está en StreamsRunning, intentando grabar de todos modos...")
+                    call.startRecording()
+                }
             }
 
             // Mostrar overlay de screening (modo silencioso)
@@ -483,9 +521,12 @@ class LinphoneService : Service() {
     
     /**
      * Configura el audio de la llamada para screening SILENCIOSO:
-     * - El usuario NO escucha nada (volumen de salida a 0 o dispositivo nulo)
+     * - El usuario NO escucha nada (volumen del sistema a 0)
      * - El micrófono del dispositivo captura el TTS para enviarlo al llamante
-     * - La llamada se graba para transcribir después
+     * - La llamada se graba con AMBOS lados del audio
+     * 
+     * IMPORTANTE: No usamos speakerMuted porque afecta la grabación.
+     * En su lugar, controlamos el volumen del sistema.
      */
     private fun configureAudioForSilentScreening(call: Call) {
         try {
@@ -497,17 +538,16 @@ class LinphoneService : Service() {
                 it.hasCapability(AudioDevice.Capabilities.CapabilityRecord)
             }
             
-            // Para salida, usar earpiece pero con volumen bajo
-            // Esto permite que la llamada funcione pero el usuario no escucha
+            // Para salida, usar earpiece (el volumen se controla externamente)
             val earpieceDevice = c.audioDevices.find { 
                 it.type == AudioDevice.Type.Earpiece && 
                 it.hasCapability(AudioDevice.Capabilities.CapabilityPlay)
             }
             
-            // Configurar dispositivos
+            // Configurar dispositivos de audio
             earpieceDevice?.let { 
                 call.outputAudioDevice = it
-                Logger.i(TAG, "Audio output (silencioso): ${it.deviceName}")
+                Logger.i(TAG, "Audio output: ${it.deviceName}")
             }
             
             micDevice?.let { 
@@ -515,9 +555,24 @@ class LinphoneService : Service() {
                 Logger.i(TAG, "Audio input: ${it.deviceName}")
             }
             
-            // Mutear el speaker del dispositivo para que el usuario no escuche
-            call.speakerMuted = true
-            Logger.i(TAG, "Audio de llamada silenciado para el usuario")
+            // IMPORTANTE: NO usar speakerMuted = true porque afecta la grabación
+            // En su lugar, silenciamos usando el volumen del sistema
+            try {
+                val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                // Guardar volumen actual para restaurarlo después
+                val currentVolume = audioManager.getStreamVolume(android.media.AudioManager.STREAM_VOICE_CALL)
+                // Establecer volumen a 0 para que el usuario no escuche
+                audioManager.setStreamVolume(
+                    android.media.AudioManager.STREAM_VOICE_CALL, 
+                    0, 
+                    0 // Sin flags para no mostrar UI
+                )
+                Logger.i(TAG, "Volumen de llamada reducido a 0 (anterior: $currentVolume)")
+            } catch (e: Exception) {
+                Logger.w(TAG, "No se pudo ajustar volumen del sistema", e)
+            }
+            
+            Logger.i(TAG, "Audio configurado para screening silencioso (grabación habilitada)")
             
         } catch (e: Exception) {
             Logger.e(TAG, "Error configurando audio silencioso", e)
@@ -881,22 +936,35 @@ class LinphoneService : Service() {
                 "TLS" -> TransportType.Tls
                 else -> TransportType.Udp
             }
+            
+            // Parsear dominio y puerto (el dominio puede venir como "server.com:5800")
+            val (host, port) = if (domain.contains(":")) {
+                val parts = domain.split(":")
+                Pair(parts[0], parts[1].toIntOrNull() ?: 5060)
+            } else {
+                Pair(domain, 5060)
+            }
+            
+            Logger.d(TAG, "Configurando SIP - Host: $host, Puerto: $port, Transporte: $transport")
 
             // Crear AccountParams
             val accountParams = core.createAccountParams()
 
-            // Configurar identidad
-            val identity = factory.createAddress("sip:$username@$domain")
+            // Configurar identidad (usar solo el host, sin puerto)
+            val identity = factory.createAddress("sip:$username@$host")
             accountParams.identityAddress = identity
 
-            // Configurar servidor
-            val serverAddress = factory.createAddress("sip:$domain")
+            // Configurar servidor con puerto explícito
+            val serverAddress = factory.createAddress("sip:$host:$port")
             serverAddress?.transport = transport
             accountParams.serverAddress = serverAddress
 
             // Habilitar registro
             accountParams.isRegisterEnabled = true
             accountParams.publishExpires = 120
+            
+            // Configurar timeout de registro (en segundos)
+            accountParams.expires = 600
 
             // Crear AuthInfo
             val authInfo = factory.createAuthInfo(
@@ -905,7 +973,7 @@ class LinphoneService : Service() {
                 password,   // password
                 null,       // ha1
                 null,       // realm
-                domain      // domain
+                host        // domain (solo el host, sin puerto)
             )
 
             // Crear Account
@@ -918,7 +986,7 @@ class LinphoneService : Service() {
             // Establecer como cuenta por defecto
             core.defaultAccount = account
 
-            Logger.i(TAG, "Cuenta creada y registrando: $username@$domain con protocolo $protocol")
+            Logger.i(TAG, "Cuenta creada y registrando: $username@$host:$port con protocolo $protocol")
             true
 
         } catch (e: Exception) {

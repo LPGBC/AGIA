@@ -50,7 +50,7 @@ class TelecomCallManager(
         val details = telecomCall.details ?: return null
         
         return CallManager.CallInfo(
-            id = details.telecomCallId ?: System.currentTimeMillis().toString(),
+            id = details.handle?.schemeSpecificPart ?: System.currentTimeMillis().toString(),
             phoneNumber = phoneNumber,
             displayName = details.callerDisplayName?.toString(),
             isIncoming = details.callDirection == TelecomCall.Details.DIRECTION_INCOMING,
@@ -65,7 +65,7 @@ class TelecomCallManager(
             if (currentState == CallManager.CallState.RINGING) {
                 Logger.i(TAG, "Descolgando llamada GSM")
                 
-                telecomCall.answer(TelecomCall.Details.ROUTE_EARPIECE)
+                telecomCall.answer(android.telecom.VideoProfile.STATE_AUDIO_ONLY)
                 callStartTime = System.currentTimeMillis()
                 
                 // Si auto-grabación está habilitada, iniciar

@@ -148,12 +148,7 @@ interface ScreeningHistoryDao {
  * Base de datos Room principal
  */
 @Database(
-    entities = [
-        SpamCheckEntity::class, 
-        CallHistoryEntity::class, 
-        ScreeningHistoryEntity::class,
-        CallRecordingEntity::class
-    ],
+    entities = [SpamCheckEntity::class, CallHistoryEntity::class, ScreeningHistoryEntity::class, CallRecordingEntity::class],
     version = 5,
     exportSchema = false
 )
