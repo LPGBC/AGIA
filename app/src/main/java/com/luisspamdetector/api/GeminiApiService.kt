@@ -21,7 +21,7 @@ class GeminiApiService(private var apiKey: String) {
     companion object {
         private const val TAG = "GeminiApiService"
         private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-        private const val MODEL = "gemini-1.5-flash"
+        private const val MODEL = "gemini-2.0-flash-exp"
         private const val TIMEOUT_SECONDS = 30L
     }
 

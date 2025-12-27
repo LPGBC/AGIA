@@ -42,6 +42,7 @@ data class ScreeningHistoryEntity(
     val callerName: String?,
     val callerPurpose: String?,
     val transcription: String?,
+    val summary: String? = null, // Resumen generado por IA de la llamada
     val recordingPath: String?,
     val duration: Int = 0, // duración en segundos
     val wasAccepted: Boolean = false,
@@ -148,7 +149,7 @@ interface ScreeningHistoryDao {
  */
 @Database(
     entities = [SpamCheckEntity::class, CallHistoryEntity::class, ScreeningHistoryEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class SpamDatabase : RoomDatabase() {
@@ -278,6 +279,7 @@ class ScreeningHistoryRepository(private val screeningHistoryDao: ScreeningHisto
         callerName: String?,
         callerPurpose: String?,
         transcription: String?,
+        summary: String? = null,
         recordingPath: String?,
         duration: Int = 0,
         wasAccepted: Boolean = false,
@@ -289,6 +291,7 @@ class ScreeningHistoryRepository(private val screeningHistoryDao: ScreeningHisto
             callerName = callerName,
             callerPurpose = callerPurpose,
             transcription = transcription,
+            summary = summary,
             recordingPath = recordingPath,
             duration = duration,
             wasAccepted = wasAccepted,

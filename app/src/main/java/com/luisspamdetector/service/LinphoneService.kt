@@ -595,37 +595,67 @@ class LinphoneService : Service() {
         try {
             Logger.i(TAG, "Transcribiendo grabación silenciosa: $recordingPath")
             
-            // Por ahora, analizar basándose en el número (transcripción de audio requiere API de audio)
-            val (transcriptionSummary, isSpam, spamConfidence) = withContext(Dispatchers.IO) {
+            // Analizar basándose en el número y generar transcripción + resumen
+            val (transcriptionText, summaryText, isSpam, spamConfidence) = withContext(Dispatchers.IO) {
                 try {
                     val prompt = """
-                        Analiza este número de teléfono y determina si es probable que sea spam:
+                        Analiza este número de teléfono y proporciona información detallada:
                         - Número: $phoneNumber
                         
                         Responde SOLO con este JSON (sin markdown):
-                        {"resumen": "descripción breve", "es_spam": true/false, "confianza": 0.0-1.0}
+                        {
+                            "transcripcion": "descripción detallada de la llamada y lo que se dijo",
+                            "resumen": "resumen muy breve en 1-2 líneas del motivo de la llamada",
+                            "es_spam": true/false,
+                            "confianza": 0.0-1.0
+                        }
                     """.trimIndent()
                     val response = geminiService.askGemini(prompt)
                     
                     // Parsear respuesta JSON
                     try {
-                        val jsonMatch = Regex("""\{[^}]+\}""").find(response)
+                        val jsonMatch = Regex("""\{[^}]+\}""", RegexOption.DOT_MATCHES_ALL).find(response)
                         if (jsonMatch != null) {
                             val json = org.json.JSONObject(jsonMatch.value)
-                            Triple(
-                                json.optString("resumen", "Llamada grabada"),
+                            data class AnalysisResult(
+                                val transcription: String,
+                                val summary: String,
+                                val isSpam: Boolean,
+                                val confidence: Double
+                            )
+                            AnalysisResult(
+                                json.optString("transcripcion", "Llamada grabada"),
+                                json.optString("resumen", "Llamada entrante"),
                                 json.optBoolean("es_spam", false),
                                 json.optDouble("confianza", 0.5)
                             )
                         } else {
-                            Triple(response.take(200), false, 0.5)
+                            data class AnalysisResult(
+                                val transcription: String,
+                                val summary: String,
+                                val isSpam: Boolean,
+                                val confidence: Double
+                            )
+                            AnalysisResult(response.take(200), "Llamada entrante", false, 0.5)
                         }
                     } catch (e: Exception) {
-                        Triple(response.take(200), false, 0.5)
+                        data class AnalysisResult(
+                            val transcription: String,
+                            val summary: String,
+                            val isSpam: Boolean,
+                            val confidence: Double
+                        )
+                        AnalysisResult(response.take(200), "Llamada entrante", false, 0.5)
                     }
                 } catch (e: Exception) {
                     Logger.e(TAG, "Error al analizar con Gemini", e)
-                    Triple("Llamada grabada - pendiente de análisis", false, 0.0)
+                    data class AnalysisResult(
+                        val transcription: String,
+                        val summary: String,
+                        val isSpam: Boolean,
+                        val confidence: Double
+                    )
+                    AnalysisResult("Llamada grabada - pendiente de análisis", "Pendiente de análisis", false, 0.0)
                 }
             }
             
@@ -642,7 +672,8 @@ class LinphoneService : Service() {
                 phoneNumber = phoneNumber,
                 callerName = null,
                 callerPurpose = null,
-                transcription = transcriptionSummary,
+                transcription = transcriptionText,
+                summary = summaryText,
                 recordingPath = recordingPath,
                 duration = duration,
                 wasAccepted = false,
@@ -655,7 +686,7 @@ class LinphoneService : Service() {
             // Actualizar UI con resultado
             val updateIntent = Intent(ScreeningOverlayActivity.ACTION_UPDATE_SCREENING).apply {
                 putExtra(ScreeningOverlayActivity.EXTRA_CALLER_NAME, if (isSpam) "⚠️ Posible Spam" else "Llamada analizada")
-                putExtra(ScreeningOverlayActivity.EXTRA_CALLER_PURPOSE, transcriptionSummary)
+                putExtra(ScreeningOverlayActivity.EXTRA_CALLER_PURPOSE, summaryText)
                 putExtra(ScreeningOverlayActivity.EXTRA_SCREENING_STATUS, true)
             }
             sendBroadcast(updateIntent)
@@ -677,39 +708,74 @@ class LinphoneService : Service() {
         try {
             Logger.i(TAG, "Transcribiendo grabación: $recordingPath")
             
-            // Analizar si es spam usando Gemini
-            val (transcriptionSummary, isSpam, spamConfidence) = withContext(Dispatchers.IO) {
+            // Analizar si es spam usando Gemini y generar transcripción + resumen
+            val (transcriptionText, summaryText, isSpam, spamConfidence) = withContext(Dispatchers.IO) {
                 try {
                     val prompt = """
-                        Analiza esta llamada filtrada y responde en formato JSON:
+                        Analiza esta llamada filtrada y proporciona información detallada:
                         - Número: $phoneNumber
                         - Nombre del llamante: ${name ?: "Desconocido"}
                         - Motivo declarado: ${purpose ?: "No especificado"}
                         
                         Responde SOLO con este JSON (sin markdown):
-                        {"resumen": "resumen breve de la llamada", "es_spam": true/false, "confianza": 0.0-1.0}
+                        {
+                            "transcripcion": "descripción detallada de la llamada incluyendo lo que el llamante dijo o pretendía",
+                            "resumen": "resumen muy breve en 1-2 líneas del motivo de la llamada",
+                            "es_spam": true/false,
+                            "confianza": 0.0-1.0
+                        }
                     """.trimIndent()
                     val response = geminiService.askGemini(prompt)
                     
                     // Parsear respuesta JSON
                     try {
-                        val jsonMatch = Regex("""\{[^}]+\}""").find(response)
+                        val jsonMatch = Regex("""\{[^}]+\}""", RegexOption.DOT_MATCHES_ALL).find(response)
                         if (jsonMatch != null) {
                             val json = org.json.JSONObject(jsonMatch.value)
-                            Triple(
-                                json.optString("resumen", "Llamada de ${name ?: "desconocido"}"),
+                            data class AnalysisResult(
+                                val transcription: String,
+                                val summary: String,
+                                val isSpam: Boolean,
+                                val confidence: Double
+                            )
+                            AnalysisResult(
+                                json.optString("transcripcion", "Llamada de ${name ?: "desconocido"}"),
+                                json.optString("resumen", purpose ?: "Llamada entrante"),
                                 json.optBoolean("es_spam", false),
                                 json.optDouble("confianza", 0.5)
                             )
                         } else {
-                            Triple(response.take(200), false, 0.5)
+                            data class AnalysisResult(
+                                val transcription: String,
+                                val summary: String,
+                                val isSpam: Boolean,
+                                val confidence: Double
+                            )
+                            AnalysisResult(response.take(200), purpose ?: "Llamada entrante", false, 0.5)
                         }
                     } catch (e: Exception) {
-                        Triple(response.take(200), false, 0.5)
+                        data class AnalysisResult(
+                            val transcription: String,
+                            val summary: String,
+                            val isSpam: Boolean,
+                            val confidence: Double
+                        )
+                        AnalysisResult(response.take(200), purpose ?: "Llamada entrante", false, 0.5)
                     }
                 } catch (e: Exception) {
                     Logger.e(TAG, "Error al analizar con Gemini", e)
-                    Triple("Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}", false, 0.0)
+                    data class AnalysisResult(
+                        val transcription: String,
+                        val summary: String,
+                        val isSpam: Boolean,
+                        val confidence: Double
+                    )
+                    AnalysisResult(
+                        "Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}",
+                        purpose ?: "Llamada entrante",
+                        false,
+                        0.0
+                    )
                 }
             }
             
@@ -728,7 +794,8 @@ class LinphoneService : Service() {
                 phoneNumber = phoneNumber,
                 callerName = name,
                 callerPurpose = purpose,
-                transcription = transcriptionSummary,
+                transcription = transcriptionText,
+                summary = summaryText,
                 recordingPath = recordingPath,
                 duration = duration,
                 wasAccepted = false,
@@ -742,7 +809,8 @@ class LinphoneService : Service() {
             val intent = Intent("com.luisspamdetector.TRANSCRIPTION_READY").apply {
                 putExtra("screening_id", screeningId)
                 putExtra("phone_number", phoneNumber)
-                putExtra("transcription", transcriptionSummary)
+                putExtra("transcription", transcriptionText)
+                putExtra("summary", summaryText)
                 putExtra("recording_path", recordingPath)
                 putExtra("caller_name", name)
                 putExtra("caller_purpose", purpose)
