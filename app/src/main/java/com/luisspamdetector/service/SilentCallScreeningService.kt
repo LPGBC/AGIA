@@ -282,6 +282,20 @@ class SilentCallScreeningService(
         cleanup()
     }
     
+    /**
+     * Rechaza/termina la llamada actual
+     */
+    fun rejectCall() {
+        currentCall?.let { call ->
+            Logger.i(TAG, "Rechazando llamada silenciosa: ${call.state}")
+            if (call.state != Call.State.End && call.state != Call.State.Released) {
+                call.terminate()
+                Logger.i(TAG, "Llamada silenciosa terminada")
+            }
+        }
+        stopScreening()
+    }
+    
     fun stopScreening() {
         player?.let {
             if (it.state == Player.State.Playing) {

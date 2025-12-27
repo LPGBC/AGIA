@@ -60,9 +60,22 @@ class LinphoneService : Service() {
             when (intent?.action) {
                 ScreeningOverlayActivity.ACTION_ACCEPT_CALL -> {
                     callScreeningService?.acceptCall()
+                    silentScreeningService?.stopScreening()
                 }
                 ScreeningOverlayActivity.ACTION_REJECT_CALL -> {
+                    // Terminar la llamada usando todos los métodos disponibles
                     callScreeningService?.rejectCall()
+                    silentScreeningService?.rejectCall()
+                    
+                    // También terminar directamente la llamada actual si existe
+                    currentScreeningCall?.let { call ->
+                        Logger.i(TAG, "Terminando llamada desde reject: ${call.state}")
+                        if (call.state != Call.State.End && call.state != Call.State.Released) {
+                            call.terminate()
+                            Logger.i(TAG, "Llamada terminada por usuario")
+                        }
+                    }
+                    currentScreeningCall = null
                 }
             }
         }
