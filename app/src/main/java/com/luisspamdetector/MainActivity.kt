@@ -871,7 +871,10 @@ fun SipConfigTab(
                     .fillMaxWidth()
                     .padding(20.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Icon(
                         imageVector = Icons.Default.Phone,
                         contentDescription = null,
@@ -881,9 +884,9 @@ fun SipConfigTab(
                     Text(
                         text = "Configuración de Cuenta SIP",
                         fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
+                        fontSize = 18.sp,
+                        modifier = Modifier.weight(1f)
                     )
-                    Spacer(modifier = Modifier.weight(1f))
                     
                     // Indicador de estado de registro
                     Row(
@@ -905,7 +908,8 @@ fun SipConfigTab(
                                    else if (sipConfigured) "Configurado"
                                    else "Sin configurar",
                             fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            maxLines = 1
                         )
                     }
                 }
