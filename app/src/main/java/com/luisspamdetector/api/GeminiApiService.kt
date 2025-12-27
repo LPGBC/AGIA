@@ -25,7 +25,7 @@ class GeminiApiService(private var apiKey: String) {
         private const val TAG = "GeminiApiService"
         private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
         private const val UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
-        private const val MODEL = "gemini-1.5-flash" // Modelo estable, 2.0-flash-exp tiene límites muy estrictos
+        private const val MODEL = "gemini-2.5-flash" // Modelo estable más reciente
         private const val TIMEOUT_SECONDS = 120L // Más tiempo para upload de audio
         private const val MAX_AUDIO_SIZE_MB = 20 // Límite de tamaño de audio
         private const val MAX_RETRIES = 3 // Número máximo de reintentos
