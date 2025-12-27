@@ -148,14 +148,20 @@ interface ScreeningHistoryDao {
  * Base de datos Room principal
  */
 @Database(
-    entities = [SpamCheckEntity::class, CallHistoryEntity::class, ScreeningHistoryEntity::class],
-    version = 4,
+    entities = [
+        SpamCheckEntity::class, 
+        CallHistoryEntity::class, 
+        ScreeningHistoryEntity::class,
+        CallRecordingEntity::class
+    ],
+    version = 5,
     exportSchema = false
 )
 abstract class SpamDatabase : RoomDatabase() {
     abstract fun spamCheckDao(): SpamCheckDao
     abstract fun callHistoryDao(): CallHistoryDao
     abstract fun screeningHistoryDao(): ScreeningHistoryDao
+    abstract fun callRecordingDao(): CallRecordingDao
 
     companion object {
         @Volatile
