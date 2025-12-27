@@ -596,7 +596,12 @@ class LinphoneService : Service() {
             Logger.i(TAG, "Transcribiendo grabación silenciosa: $recordingPath")
             
             // Analizar basándose en el número y generar transcripción + resumen
-            val (transcriptionText, summaryText, isSpam, spamConfidence) = withContext(Dispatchers.IO) {
+            var transcriptionText = "Llamada grabada - pendiente de análisis"
+            var summaryText = "Pendiente de análisis"
+            var isSpam = false
+            var spamConfidence = 0.0
+            
+            withContext(Dispatchers.IO) {
                 try {
                     val prompt = """
                         Analiza este número de teléfono y proporciona información detallada:
@@ -617,45 +622,20 @@ class LinphoneService : Service() {
                         val jsonMatch = Regex("""\{[^}]+\}""", RegexOption.DOT_MATCHES_ALL).find(response)
                         if (jsonMatch != null) {
                             val json = org.json.JSONObject(jsonMatch.value)
-                            data class AnalysisResult(
-                                val transcription: String,
-                                val summary: String,
-                                val isSpam: Boolean,
-                                val confidence: Double
-                            )
-                            AnalysisResult(
-                                json.optString("transcripcion", "Llamada grabada"),
-                                json.optString("resumen", "Llamada entrante"),
-                                json.optBoolean("es_spam", false),
-                                json.optDouble("confianza", 0.5)
-                            )
+                            transcriptionText = json.optString("transcripcion", "Llamada grabada")
+                            summaryText = json.optString("resumen", "Llamada entrante")
+                            isSpam = json.optBoolean("es_spam", false)
+                            spamConfidence = json.optDouble("confianza", 0.5)
                         } else {
-                            data class AnalysisResult(
-                                val transcription: String,
-                                val summary: String,
-                                val isSpam: Boolean,
-                                val confidence: Double
-                            )
-                            AnalysisResult(response.take(200), "Llamada entrante", false, 0.5)
+                            transcriptionText = response.take(200)
+                            summaryText = "Llamada entrante"
                         }
                     } catch (e: Exception) {
-                        data class AnalysisResult(
-                            val transcription: String,
-                            val summary: String,
-                            val isSpam: Boolean,
-                            val confidence: Double
-                        )
-                        AnalysisResult(response.take(200), "Llamada entrante", false, 0.5)
+                        transcriptionText = response.take(200)
+                        summaryText = "Llamada entrante"
                     }
                 } catch (e: Exception) {
                     Logger.e(TAG, "Error al analizar con Gemini", e)
-                    data class AnalysisResult(
-                        val transcription: String,
-                        val summary: String,
-                        val isSpam: Boolean,
-                        val confidence: Double
-                    )
-                    AnalysisResult("Llamada grabada - pendiente de análisis", "Pendiente de análisis", false, 0.0)
                 }
             }
             
@@ -709,7 +689,12 @@ class LinphoneService : Service() {
             Logger.i(TAG, "Transcribiendo grabación: $recordingPath")
             
             // Analizar si es spam usando Gemini y generar transcripción + resumen
-            val (transcriptionText, summaryText, isSpam, spamConfidence) = withContext(Dispatchers.IO) {
+            var transcriptionText = "Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}"
+            var summaryText = purpose ?: "Llamada entrante"
+            var isSpam = false
+            var spamConfidence = 0.0
+            
+            withContext(Dispatchers.IO) {
                 try {
                     val prompt = """
                         Analiza esta llamada filtrada y proporciona información detallada:
@@ -732,50 +717,20 @@ class LinphoneService : Service() {
                         val jsonMatch = Regex("""\{[^}]+\}""", RegexOption.DOT_MATCHES_ALL).find(response)
                         if (jsonMatch != null) {
                             val json = org.json.JSONObject(jsonMatch.value)
-                            data class AnalysisResult(
-                                val transcription: String,
-                                val summary: String,
-                                val isSpam: Boolean,
-                                val confidence: Double
-                            )
-                            AnalysisResult(
-                                json.optString("transcripcion", "Llamada de ${name ?: "desconocido"}"),
-                                json.optString("resumen", purpose ?: "Llamada entrante"),
-                                json.optBoolean("es_spam", false),
-                                json.optDouble("confianza", 0.5)
-                            )
+                            transcriptionText = json.optString("transcripcion", "Llamada de ${name ?: "desconocido"}")
+                            summaryText = json.optString("resumen", purpose ?: "Llamada entrante")
+                            isSpam = json.optBoolean("es_spam", false)
+                            spamConfidence = json.optDouble("confianza", 0.5)
                         } else {
-                            data class AnalysisResult(
-                                val transcription: String,
-                                val summary: String,
-                                val isSpam: Boolean,
-                                val confidence: Double
-                            )
-                            AnalysisResult(response.take(200), purpose ?: "Llamada entrante", false, 0.5)
+                            transcriptionText = response.take(200)
+                            summaryText = purpose ?: "Llamada entrante"
                         }
                     } catch (e: Exception) {
-                        data class AnalysisResult(
-                            val transcription: String,
-                            val summary: String,
-                            val isSpam: Boolean,
-                            val confidence: Double
-                        )
-                        AnalysisResult(response.take(200), purpose ?: "Llamada entrante", false, 0.5)
+                        transcriptionText = response.take(200)
+                        summaryText = purpose ?: "Llamada entrante"
                     }
                 } catch (e: Exception) {
                     Logger.e(TAG, "Error al analizar con Gemini", e)
-                    data class AnalysisResult(
-                        val transcription: String,
-                        val summary: String,
-                        val isSpam: Boolean,
-                        val confidence: Double
-                    )
-                    AnalysisResult(
-                        "Llamada de ${name ?: "desconocido"}: ${purpose ?: "motivo no especificado"}",
-                        purpose ?: "Llamada entrante",
-                        false,
-                        0.0
-                    )
                 }
             }
             
