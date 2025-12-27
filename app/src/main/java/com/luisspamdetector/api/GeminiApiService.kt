@@ -24,11 +24,13 @@ class GeminiApiService(private var apiKey: String) {
     companion object {
         private const val TAG = "GeminiApiService"
         private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-        private const val MODEL = "gemini-2.0-flash-exp"
-        private const val TIMEOUT_SECONDS = 60L // Más tiempo para audio
+        private const val UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+        private const val MODEL = "gemini-1.5-flash" // Modelo estable, 2.0-flash-exp tiene límites muy estrictos
+        private const val TIMEOUT_SECONDS = 120L // Más tiempo para upload de audio
         private const val MAX_AUDIO_SIZE_MB = 20 // Límite de tamaño de audio
         private const val MAX_RETRIES = 3 // Número máximo de reintentos
-        private const val INITIAL_DELAY_MS = 2000L // Delay inicial para backoff
+        private const val INITIAL_DELAY_MS = 5000L // Delay inicial 5 segundos (recomendado por Google)
+        private const val USE_FILE_API_THRESHOLD_MB = 1 // Usar File API para archivos > 1MB
     }
 
     private val client = OkHttpClient.Builder()
@@ -94,8 +96,16 @@ class GeminiApiService(private var apiKey: String) {
                 
                 Log.i(TAG, "Transcribiendo audio: ${audioFile.name}, tamaño: ${fileSizeMB}MB, tipo: $mimeType")
                 
-                // Intentar con reintentos en caso de error 429
-                val response = makeAudioApiRequestWithRetry(audioBase64, mimeType, phoneNumber)
+                // Decidir si usar File API o inline basado en el tamaño
+                val response = if (fileSizeMB >= USE_FILE_API_THRESHOLD_MB) {
+                    // Usar File API para archivos grandes (recomendado por Google)
+                    Log.i(TAG, "Usando File API para archivo de ${fileSizeMB}MB")
+                    transcribeWithFileApi(audioFile, mimeType, phoneNumber)
+                } else {
+                    // Usar inline para archivos pequeños
+                    Log.i(TAG, "Usando método inline para archivo pequeño")
+                    makeAudioApiRequestWithRetry(audioBase64, mimeType, phoneNumber)
+                }
                 parseTranscriptionResponse(response)
                 
             } catch (e: Exception) {
@@ -108,6 +118,207 @@ class GeminiApiService(private var apiKey: String) {
                 )
             }
         }
+    }
+    
+    /**
+     * Transcribe audio usando la File API de Gemini (recomendado para archivos > 1MB)
+     * Paso 1: Sube el archivo a files.upload
+     * Paso 2: Usa la URI devuelta en el prompt
+     */
+    private suspend fun transcribeWithFileApi(audioFile: File, mimeType: String, phoneNumber: String): String {
+        var lastException: Exception? = null
+        var delayMs = INITIAL_DELAY_MS
+        
+        repeat(MAX_RETRIES) { attempt ->
+            try {
+                Log.d(TAG, "File API - Intento ${attempt + 1} de $MAX_RETRIES")
+                
+                // Paso 1: Subir el archivo
+                val fileUri = uploadFileToGemini(audioFile, mimeType)
+                Log.i(TAG, "Archivo subido exitosamente, URI: $fileUri")
+                
+                // Paso 2: Usar la URI en el prompt
+                return makeApiRequestWithFileUri(fileUri, mimeType, phoneNumber)
+                
+            } catch (e: IOException) {
+                lastException = e
+                if (e.message?.contains("429") == true) {
+                    Log.w(TAG, "Rate limit alcanzado (429), esperando ${delayMs}ms antes de reintentar...")
+                    delay(delayMs)
+                    delayMs *= 2
+                } else {
+                    throw e
+                }
+            }
+        }
+        
+        throw lastException ?: IOException("Error desconocido después de $MAX_RETRIES intentos")
+    }
+    
+    /**
+     * Sube un archivo a la File API de Gemini
+     * @return URI del archivo (ej: "files/abc-123")
+     */
+    private fun uploadFileToGemini(audioFile: File, mimeType: String): String {
+        val uploadUrl = "$UPLOAD_URL?key=$apiKey"
+        
+        // Leer el archivo y codificar en base64
+        val audioBytes = audioFile.readBytes()
+        val audioBase64 = Base64.encodeToString(audioBytes, Base64.NO_WRAP)
+        
+        // Crear el request body para upload
+        val requestJson = """
+            {
+                "file": {
+                    "display_name": "${audioFile.name}",
+                    "mime_type": "$mimeType"
+                }
+            }
+        """.trimIndent()
+        
+        // Usar multipart upload con el archivo
+        val boundary = "----GeminiFileUpload${System.currentTimeMillis()}"
+        val mediaType = "multipart/related; boundary=$boundary".toMediaType()
+        
+        val multipartBody = buildString {
+            // Parte 1: Metadata JSON
+            append("--$boundary\r\n")
+            append("Content-Type: application/json; charset=utf-8\r\n\r\n")
+            append(requestJson)
+            append("\r\n")
+            
+            // Parte 2: Datos del archivo
+            append("--$boundary\r\n")
+            append("Content-Type: $mimeType\r\n")
+            append("Content-Transfer-Encoding: base64\r\n\r\n")
+            append(audioBase64)
+            append("\r\n")
+            append("--$boundary--")
+        }
+        
+        val body = multipartBody.toRequestBody(mediaType)
+        
+        val request = Request.Builder()
+            .url(uploadUrl)
+            .post(body)
+            .addHeader("Content-Type", "multipart/related; boundary=$boundary")
+            .build()
+        
+        Log.d(TAG, "Subiendo archivo a File API: ${audioFile.name}")
+        val response = client.newCall(request).execute()
+        
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: "Unknown error"
+            Log.e(TAG, "Error subiendo archivo: ${response.code} - $errorBody")
+            throw IOException("File upload error: ${response.code} - $errorBody")
+        }
+        
+        val responseBody = response.body?.string() ?: throw IOException("Empty response from file upload")
+        Log.d(TAG, "Respuesta de upload: $responseBody")
+        
+        // Parsear la respuesta para obtener el file URI
+        return parseFileUri(responseBody)
+    }
+    
+    /**
+     * Parsea la respuesta del upload para extraer el file URI
+     */
+    private fun parseFileUri(responseBody: String): String {
+        try {
+            val jsonObject = gson.fromJson(responseBody, Map::class.java)
+            val file = jsonObject["file"] as? Map<*, *>
+            val uri = file?.get("uri") as? String
+            if (uri != null) {
+                return uri
+            }
+            // Alternativa: buscar name
+            val name = file?.get("name") as? String
+            if (name != null) {
+                return name
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parseando respuesta de upload", e)
+        }
+        throw IOException("No se pudo obtener el URI del archivo subido")
+    }
+    
+    /**
+     * Hace la solicitud de transcripción usando el file URI
+     */
+    private fun makeApiRequestWithFileUri(fileUri: String, mimeType: String, phoneNumber: String): String {
+        if (apiKey.isBlank()) {
+            throw IllegalStateException("API key no configurada")
+        }
+
+        val url = "$BASE_URL/$MODEL:generateContent?key=$apiKey"
+        
+        val prompt = buildString {
+            append("Escucha atentamente este audio de una llamada telefónica y proporciona: ")
+            append("1. Una transcripción completa de todo lo que se dice en el audio. ")
+            append("2. Un resumen breve del motivo de la llamada. ")
+            append("3. Análisis de si parece ser spam/telemarketing/estafa. ")
+            append("Número de teléfono del llamante: $phoneNumber. ")
+            append("Responde EXACTAMENTE en este formato JSON sin markdown: ")
+            append("{")
+            append("transcripcion: transcripción completa palabra por palabra, ")
+            append("resumen: resumen breve en 1-2 líneas, ")
+            append("es_spam: true o false, ")
+            append("confianza_spam: número entre 0.0 y 1.0, ")
+            append("idioma_detectado: español o inglés u otro")
+            append("}. ")
+            append("Si el audio está vacío o en silencio indica Audio sin contenido audible en la transcripción.")
+        }
+        
+        val escapedPrompt = prompt
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        
+        // Request body usando file_data con la URI del archivo subido
+        val requestJson = """
+            {
+                "contents": [{
+                    "parts": [
+                        {
+                            "file_data": {
+                                "mime_type": "$mimeType",
+                                "file_uri": "$fileUri"
+                            }
+                        },
+                        {
+                            "text": "$escapedPrompt"
+                        }
+                    ]
+                }],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 2048
+                }
+            }
+        """.trimIndent()
+        
+        val mediaType = "application/json".toMediaType()
+        val body = requestJson.toRequestBody(mediaType)
+
+        val request = Request.Builder()
+            .url(url)
+            .post(body)
+            .addHeader("Content-Type", "application/json")
+            .build()
+
+        Log.d(TAG, "Enviando solicitud con file_uri: $fileUri")
+        val response = client.newCall(request).execute()
+
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: "Unknown error"
+            Log.e(TAG, "API error transcribiendo con file URI: ${response.code} - $errorBody")
+            throw IOException("API error: ${response.code} - $errorBody")
+        }
+
+        val responseBody = response.body?.string() ?: throw IOException("Empty response")
+        return extractTextFromResponse(responseBody)
     }
     
     /**
