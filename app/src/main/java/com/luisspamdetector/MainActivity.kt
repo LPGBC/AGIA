@@ -105,9 +105,9 @@ fun MainScreen(
     var apiKey by remember { mutableStateOf(prefs.getString("gemini_api_key", "") ?: "") }
     var showApiKey by remember { mutableStateOf(false) }
     var serviceEnabled by remember { mutableStateOf(prefs.getBoolean("service_enabled", false)) }
-    var spamDetectionEnabled by remember { mutableStateOf(prefs.getBoolean("spam_detection_enabled", true)) }
     var callScreeningEnabled by remember { mutableStateOf(prefs.getBoolean("call_screening_enabled", false)) }
     var testModeEnabled by remember { mutableStateOf(prefs.getBoolean("test_mode_enabled", false)) }
+    var screeningDurationSeconds by remember { mutableStateOf(prefs.getInt("screening_duration_seconds", 8)) }
     
     // Variables SIP
     var sipUsername by remember { mutableStateOf(prefs.getString("sip_username", "") ?: "") }
@@ -222,9 +222,9 @@ fun MainScreen(
                 serviceEnabled = serviceEnabled,
                 apiKey = apiKey,
                 showApiKey = showApiKey,
-                spamDetectionEnabled = spamDetectionEnabled,
                 callScreeningEnabled = callScreeningEnabled,
                 testModeEnabled = testModeEnabled,
+                screeningDurationSeconds = screeningDurationSeconds,
                 hasAllPermissions = hasAllPermissions,
                 hasOverlayPermission = hasOverlayPermission,
                 hasBatteryExemption = hasBatteryExemption,
@@ -258,10 +258,6 @@ fun MainScreen(
                     prefs.edit().putString("gemini_api_key", newKey).apply()
                 },
                 onToggleApiKeyVisibility = { showApiKey = !showApiKey },
-                onSpamDetectionChange = { enabled ->
-                    spamDetectionEnabled = enabled
-                    prefs.edit().putBoolean("spam_detection_enabled", enabled).apply()
-                },
                 onCallScreeningChange = { enabled ->
                     if (enabled && !hasOverlayPermission) {
                         Toast.makeText(context, "Concede permiso de overlay primero", Toast.LENGTH_SHORT).show()
@@ -273,6 +269,10 @@ fun MainScreen(
                 onTestModeChange = { enabled ->
                     testModeEnabled = enabled
                     prefs.edit().putBoolean("test_mode_enabled", enabled).apply()
+                },
+                onScreeningDurationChange = { seconds ->
+                    screeningDurationSeconds = seconds
+                    prefs.edit().putInt("screening_duration_seconds", seconds).apply()
                 },
                 onRequestPermissions = {
                     onRequestPermissions()
@@ -365,18 +365,18 @@ fun MainTab(
     serviceEnabled: Boolean,
     apiKey: String,
     showApiKey: Boolean,
-    spamDetectionEnabled: Boolean,
     callScreeningEnabled: Boolean,
     testModeEnabled: Boolean,
+    screeningDurationSeconds: Int,
     hasAllPermissions: Boolean,
     hasOverlayPermission: Boolean,
     hasBatteryExemption: Boolean,
     onServiceToggle: (Boolean) -> Unit,
     onApiKeyChange: (String) -> Unit,
     onToggleApiKeyVisibility: () -> Unit,
-    onSpamDetectionChange: (Boolean) -> Unit,
     onCallScreeningChange: (Boolean) -> Unit,
     onTestModeChange: (Boolean) -> Unit,
+    onScreeningDurationChange: (Int) -> Unit,
     onRequestPermissions: () -> Unit,
     onRequestOverlay: () -> Unit,
     onRequestBattery: () -> Unit
@@ -420,14 +420,14 @@ fun MainTab(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Opciones de detección
+            // Opciones de Call Screening
             DetectionOptionsCard(
-                spamDetectionEnabled = spamDetectionEnabled,
                 callScreeningEnabled = callScreeningEnabled,
                 testModeEnabled = testModeEnabled,
-                onSpamDetectionChange = onSpamDetectionChange,
+                screeningDurationSeconds = screeningDurationSeconds,
                 onCallScreeningChange = onCallScreeningChange,
-                onTestModeChange = onTestModeChange
+                onTestModeChange = onTestModeChange,
+                onScreeningDurationChange = onScreeningDurationChange
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -677,12 +677,12 @@ fun ApiConfigCard(
 
 @Composable
 fun DetectionOptionsCard(
-    spamDetectionEnabled: Boolean,
     callScreeningEnabled: Boolean,
     testModeEnabled: Boolean,
-    onSpamDetectionChange: (Boolean) -> Unit,
+    screeningDurationSeconds: Int,
     onCallScreeningChange: (Boolean) -> Unit,
-    onTestModeChange: (Boolean) -> Unit
+    onTestModeChange: (Boolean) -> Unit,
+    onScreeningDurationChange: (Int) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -694,38 +694,11 @@ fun DetectionOptionsCard(
                 .padding(20.dp)
         ) {
             Text(
-                text = "Opciones de Detección",
+                text = "Opciones de Call Screening",
                 fontWeight = FontWeight.Bold,
                 fontSize = 18.sp
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Detección de spam
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Detección de SPAM",
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "Analiza números desconocidos con IA",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
-                Switch(
-                    checked = spamDetectionEnabled,
-                    onCheckedChange = onSpamDetectionChange
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-            Divider()
             Spacer(modifier = Modifier.height(16.dp))
 
             // Call screening
@@ -801,6 +774,64 @@ fun DetectionOptionsCard(
                         checked = testModeEnabled,
                         onCheckedChange = onTestModeChange
                     )
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                Divider()
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // Duración del screening
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Timer,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Duración del screening",
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Tiempo de espera para que el llamante responda",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Slider(
+                            value = screeningDurationSeconds.toFloat(),
+                            onValueChange = { onScreeningDurationChange(it.toInt()) },
+                            valueRange = 5f..30f,
+                            steps = 4,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer
+                        ) {
+                            Text(
+                                text = "${screeningDurationSeconds}s",
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -1,28 +1,24 @@
-# AGIA - Detector de SPAM con IA
+# AGIA - Asistente de Llamadas con IA
 
-Aplicación Android para detección de llamadas SPAM usando Linphone SDK y Gemini AI.
+Aplicación Android para Call Screening inteligente usando Linphone SDK y Gemini AI.
 
 ## 🚀 Características
 
-### 🛡️ Detección de SPAM
-- Analiza números desconocidos usando Gemini AI
-- Ignora automáticamente contactos guardados
-- Caché de resultados para evitar llamadas repetidas a la API
-- Notificaciones de alerta para posible spam
-
-### 📞 Call Screening (Beta)
+### 📞 Call Screening
 - Auto-contesta llamadas de números desconocidos
-- Usa TTS para preguntar nombre y motivo
-- Usa STT para capturar respuestas
+- Usa TTS para preguntar nombre y motivo de la llamada
+- Graba la respuesta del interlocutor
 - Procesa con Gemini AI y muestra resumen al usuario
 - El usuario decide si acepta o rechaza
+- **Duración configurable**: Ajusta el tiempo de espera para la respuesta (5-30 segundos)
+- **Detección de cuelgue**: Si el interlocutor cuelga, la llamada termina automáticamente
 
-### 🔧 Configuración SIP (Nuevo)
+### 🔧 Configuración SIP
 - Interfaz integrada para configurar cuenta SIP
 - Soporte para llamadas VoIP
 - Registro automático al iniciar el servicio
 
-### 📝 Sistema de Logs (Nuevo)
+### 📝 Sistema de Logs
 - Logs centralizados con Logger personalizado
 - Visor de logs integrado en la app
 - Exportar logs para depuración
@@ -81,9 +77,10 @@ gradle assembleDebug
 1. Configura tu API key de Gemini
 2. Concede los permisos necesarios
 3. Activa el servicio de protección
-4. Configura las opciones de detección:
-   - **Detección de SPAM**: Analiza números desconocidos
-   - **Call Screening**: Auto-contesta y filtra llamadas
+4. Configura las opciones de Call Screening:
+   - **Call Screening**: Activa/desactiva el filtrado automático de llamadas
+   - **Modo Prueba**: Aplica screening a TODAS las llamadas (incluye contactos)
+   - **Duración del screening**: Ajusta el tiempo de espera para la respuesta del llamante (5-30 segundos)
 
 ### Pestaña SIP
 1. Ingresa las credenciales de tu cuenta SIP

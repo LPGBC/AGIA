@@ -46,8 +46,10 @@ class SilentCallScreeningService(
     private var audioFilesReady = false
     
     private var currentCall: Call? = null
+    private var currentPhoneNumber: String? = null
     private var player: Player? = null
     private var screeningPhase = ScreeningPhase.IDLE
+    private var callMonitoringJob: Job? = null
     
     private var screeningCallback: ScreeningCallback? = null
     
@@ -182,10 +184,14 @@ class SilentCallScreeningService(
         }
         
         currentCall = call
+        currentPhoneNumber = phoneNumber
         screeningPhase = ScreeningPhase.PLAYING_GREETING
         
         Logger.i(TAG, "Starting silent screening for: $phoneNumber")
         screeningCallback?.onScreeningStarted(call, phoneNumber)
+        
+        // Iniciar monitoreo del estado de la llamada
+        startCallStateMonitoring(call)
         
         // Obtener el player de la llamada
         player = call.player
@@ -203,6 +209,57 @@ class SilentCallScreeningService(
                 onGreetingComplete()
             }
         }
+    }
+    
+    /**
+     * Monitorea el estado de la llamada para detectar cuando el remoto cuelga
+     */
+    private fun startCallStateMonitoring(call: Call) {
+        callMonitoringJob?.cancel()
+        callMonitoringJob = scope.launch {
+            while (isActive) {
+                val state = call.state
+                if (state == Call.State.End || state == Call.State.Released || state == Call.State.Error) {
+                    Logger.i(TAG, "Llamada remota terminada durante screening: $state")
+                    handleRemoteHangup()
+                    break
+                }
+                delay(500) // Verificar cada 500ms
+            }
+        }
+    }
+    
+    /**
+     * Maneja cuando el remoto cuelga la llamada
+     */
+    private fun handleRemoteHangup() {
+        Logger.i(TAG, "El interlocutor colgó la llamada")
+        
+        // Detener cualquier reproducción en curso
+        player?.let {
+            if (it.state == Player.State.Playing) {
+                it.pause()
+            }
+            it.close()
+        }
+        
+        // Detener grabación si estaba activa
+        currentCall?.let { call ->
+            try {
+                call.stopRecording()
+                Logger.i(TAG, "Grabación detenida por cuelgue remoto")
+            } catch (e: Exception) {
+                Logger.w(TAG, "Error deteniendo grabación", e)
+            }
+        }
+        
+        val phoneNumber = currentPhoneNumber ?: "unknown"
+        val recordingPath = currentCall?.params?.recordFile
+        
+        // Notificar que el screening terminó (por cuelgue remoto)
+        screeningCallback?.onScreeningCompleted(phoneNumber, recordingPath)
+        
+        cleanup()
     }
     
     private fun playAudioInCall(filename: String, onComplete: () -> Unit) {
@@ -250,12 +307,50 @@ class SilentCallScreeningService(
     }
     
     private fun onGreetingComplete() {
-        Logger.d(TAG, "Greeting complete, waiting for caller response")
+        Logger.d(TAG, "Greeting complete, starting recording for caller response ONLY")
         screeningPhase = ScreeningPhase.WAITING_RESPONSE
         
-        // Esperar un tiempo para que el llamante responda (la grabación captura todo)
+        // Obtener duración configurada desde preferencias
+        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val screeningDurationSeconds = prefs.getInt("screening_duration_seconds", 8)
+        val screeningDurationMs = screeningDurationSeconds * 1000L
+        
+        Logger.i(TAG, "Duración del screening configurada: ${screeningDurationSeconds}s")
+        
+        // IMPORTANTE: Mutear el micrófono antes de grabar
+        // Así solo se graba el audio REMOTO (la voz del interlocutor)
+        currentCall?.let { call ->
+            try {
+                // Mutear micrófono para que NO se grabe nuestro audio
+                call.microphoneMuted = true
+                Logger.i(TAG, "Micrófono muteado para grabar solo audio remoto")
+                
+                // Iniciar grabación - solo capturará el audio del interlocutor
+                call.startRecording()
+                Logger.i(TAG, "✓ Grabación iniciada (solo audio remoto/interlocutor)")
+                Logger.i(TAG, "  - recordFile: ${call.params?.recordFile}")
+            } catch (e: Exception) {
+                Logger.e(TAG, "Error iniciando grabación", e)
+            }
+        }
+        
+        // Esperar el tiempo configurado para que el llamante responda
         scope.launch {
-            delay(8000) // 8 segundos para responder
+            delay(screeningDurationMs)
+            
+            // Detener grabación y desmutear antes de reproducir despedida
+            currentCall?.let { call ->
+                try {
+                    call.stopRecording()
+                    Logger.i(TAG, "Grabación detenida")
+                    
+                    // Desmutear para poder reproducir la despedida
+                    call.microphoneMuted = false
+                    Logger.i(TAG, "Micrófono desmuteado para despedida")
+                } catch (e: Exception) {
+                    Logger.w(TAG, "Error deteniendo grabación", e)
+                }
+            }
             
             // Reproducir despedida
             screeningPhase = ScreeningPhase.PLAYING_GOODBYE
@@ -307,7 +402,10 @@ class SilentCallScreeningService(
     }
     
     private fun cleanup() {
+        callMonitoringJob?.cancel()
+        callMonitoringJob = null
         currentCall = null
+        currentPhoneNumber = null
         player = null
         screeningPhase = ScreeningPhase.IDLE
     }

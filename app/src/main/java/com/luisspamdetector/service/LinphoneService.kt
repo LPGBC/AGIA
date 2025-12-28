@@ -471,6 +471,14 @@ class LinphoneService : Service() {
             Call.State.Released -> {
                 Logger.i(TAG, "Llamada terminada")
                 
+                // Detener el screening si estaba activo (el remoto colgó)
+                silentScreeningService?.stopScreening()
+                callScreeningService?.rejectCall()
+                
+                // Cerrar la UI de screening si estaba abierta
+                val closeIntent = Intent(ScreeningOverlayActivity.ACTION_REJECT_CALL)
+                sendBroadcast(closeIntent)
+                
                 // Calcular duración y registrar en Call Log del sistema
                 currentCallPhoneNumber?.let { phoneNumber ->
                     val duration = if (currentCallWasAnswered) {
