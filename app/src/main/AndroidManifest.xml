@@ -5,6 +5,7 @@
     <!-- Permisos para llamadas -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     
@@ -90,6 +91,17 @@
         <!-- Actividad overlay para call screening -->
         <activity
             android:name=".ui.ScreeningOverlayActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.LinphoneSpamDetector.Overlay" />
+
+        <!-- Actividad de control de llamadas (softphone) -->
+        <activity
+            android:name=".ui.CallControlActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:launchMode="singleInstance"

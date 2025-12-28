@@ -26,7 +26,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.luisspamdetector.call.CallManager
+import com.luisspamdetector.service.LinphoneService
 import com.luisspamdetector.ui.theme.LinphoneSpamDetectorTheme
+import com.luisspamdetector.util.Logger
 import kotlinx.coroutines.delay
 
 /**
@@ -36,13 +38,15 @@ import kotlinx.coroutines.delay
 class CallControlActivity : ComponentActivity() {
 
     companion object {
+        private const val TAG = "CallControlActivity"
+        
         const val EXTRA_PHONE_NUMBER = "phone_number"
         const val EXTRA_DISPLAY_NAME = "display_name"
         const val EXTRA_IS_SPAM = "is_spam"
         const val EXTRA_SPAM_CONFIDENCE = "spam_confidence"
         const val EXTRA_SPAM_REASON = "spam_reason"
         
-        // Acciones broadcast
+        // Acciones broadcast (mantenidas por compatibilidad)
         const val ACTION_ANSWER_CALL = "com.luisspamdetector.ACTION_ANSWER_CALL"
         const val ACTION_HANGUP_CALL = "com.luisspamdetector.ACTION_HANGUP_CALL"
         const val ACTION_TOGGLE_RECORDING = "com.luisspamdetector.ACTION_TOGGLE_RECORDING"
@@ -69,16 +73,83 @@ class CallControlActivity : ComponentActivity() {
                     isSpam = isSpam,
                     spamConfidence = spamConfidence,
                     spamReason = spamReason,
-                    onAnswer = { sendBroadcast(android.content.Intent(ACTION_ANSWER_CALL)) },
+                    onAnswer = { answerCall() },
                     onHangup = { 
-                        sendBroadcast(android.content.Intent(ACTION_HANGUP_CALL))
+                        hangupCall()
                         finish()
                     },
-                    onToggleRecording = { sendBroadcast(android.content.Intent(ACTION_TOGGLE_RECORDING)) },
-                    onToggleMute = { sendBroadcast(android.content.Intent(ACTION_TOGGLE_MUTE)) },
-                    onToggleSpeaker = { sendBroadcast(android.content.Intent(ACTION_TOGGLE_SPEAKER)) }
+                    onToggleRecording = { toggleRecording() },
+                    onToggleMute = { toggleMute() },
+                    onToggleSpeaker = { toggleSpeaker() }
                 )
             }
+        }
+    }
+    
+    /**
+     * Contesta la llamada usando directamente el servicio
+     */
+    private fun answerCall() {
+        Logger.i(TAG, "Intentando contestar llamada...")
+        val service = LinphoneService.instance
+        if (service != null) {
+            service.answerCurrentCall()
+            Logger.i(TAG, "Llamada contestada via servicio")
+        } else {
+            Logger.e(TAG, "LinphoneService no disponible para contestar")
+        }
+    }
+    
+    /**
+     * Cuelga la llamada usando directamente el servicio
+     */
+    private fun hangupCall() {
+        Logger.i(TAG, "Intentando colgar llamada...")
+        val service = LinphoneService.instance
+        if (service != null) {
+            service.hangupCurrentCall()
+            Logger.i(TAG, "Llamada colgada via servicio")
+        } else {
+            Logger.e(TAG, "LinphoneService no disponible para colgar")
+        }
+    }
+    
+    /**
+     * Alterna la grabación
+     */
+    private fun toggleRecording() {
+        Logger.i(TAG, "Toggle grabación...")
+        val service = LinphoneService.instance
+        if (service != null) {
+            service.toggleCurrentCallRecording()
+        } else {
+            Logger.e(TAG, "LinphoneService no disponible para toggle recording")
+        }
+    }
+    
+    /**
+     * Alterna el mute del micrófono
+     */
+    private fun toggleMute() {
+        Logger.i(TAG, "Toggle mute...")
+        val service = LinphoneService.instance
+        if (service != null) {
+            service.toggleCurrentCallMute()
+        } else {
+            Logger.e(TAG, "LinphoneService no disponible para toggle mute")
+        }
+    }
+    
+    /**
+     * Alterna el altavoz
+     */
+    private fun toggleSpeaker() {
+        Logger.i(TAG, "Toggle speaker...")
+        val service = LinphoneService.instance
+        if (service != null) {
+            service.toggleSpeaker()
+        } else {
+            Logger.e(TAG, "LinphoneService no disponible para toggle speaker")
         }
     }
 

@@ -341,6 +341,17 @@ fun MainScreen(
                     sipConfigured = false
                     sipRegistered = false
                     Toast.makeText(context, "Configuración SIP eliminada", Toast.LENGTH_SHORT).show()
+                },
+                onRefreshRegistration = {
+                    // Solicitar actualización del estado de registro
+                    val service = LinphoneService.instance
+                    if (service != null) {
+                        service.refreshRegistration()
+                        service.broadcastCurrentRegistrationState()
+                        Toast.makeText(context, "Actualizando estado de registro...", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "El servicio no está activo", Toast.LENGTH_SHORT).show()
+                    }
                 }
             )
             3 -> LogsTab(paddingValues = paddingValues)
@@ -853,7 +864,8 @@ fun SipConfigTab(
     onProtocolChange: (String) -> Unit,
     onTogglePasswordVisibility: () -> Unit,
     onSave: () -> Unit,
-    onClear: () -> Unit
+    onClear: () -> Unit,
+    onRefreshRegistration: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -1044,6 +1056,20 @@ fun SipConfigTab(
                         Icon(Icons.Default.Save, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Guardar", fontWeight = FontWeight.Bold)
+                    }
+                }
+                
+                // Botón para refrescar estado de registro SIP
+                if (sipConfigured) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = onRefreshRegistration,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Actualizar estado de registro")
                     }
                 }
             }
@@ -1242,15 +1268,27 @@ fun HistoryTab(paddingValues: PaddingValues) {
     val historyRepository = remember { ScreeningHistoryRepository(db.screeningHistoryDao()) }
     
     var historyItems by remember { mutableStateOf<List<ScreeningHistoryEntity>>(emptyList()) }
+    var callRecordings by remember { mutableStateOf<List<com.luisspamdetector.data.CallRecordingEntity>>(emptyList()) }
+    var selectedTabIndex by remember { mutableStateOf(0) }
     var expandedItemId by remember { mutableStateOf<Long?>(null) }
+    var expandedRecordingId by remember { mutableStateOf<Long?>(null) }
     var playingItemId by remember { mutableStateOf<Long?>(null) }
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var isTranscribing by remember { mutableStateOf<Long?>(null) }
     
     val dateFormat = remember { SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()) }
     
     // Load history on first composition
     LaunchedEffect(Unit) {
         historyItems = historyRepository.getRecentScreenings(100)
+        callRecordings = db.callRecordingDao().getRecent(100)
+    }
+    
+    // Recargar cuando cambia la tab
+    LaunchedEffect(selectedTabIndex) {
+        if (selectedTabIndex == 1) {
+            callRecordings = db.callRecordingDao().getRecent(100)
+        }
     }
     
     // Cleanup media player
@@ -1260,10 +1298,8 @@ fun HistoryTab(paddingValues: PaddingValues) {
         }
     }
     
-    fun playRecording(item: ScreeningHistoryEntity) {
-        if (item.recordingPath.isNullOrEmpty()) return
-        
-        val file = File(item.recordingPath)
+    fun playRecordingFromPath(recordingPath: String, itemId: Long) {
+        val file = File(recordingPath)
         if (!file.exists()) {
             Toast.makeText(context, "Grabación no encontrada", Toast.LENGTH_SHORT).show()
             return
@@ -1274,14 +1310,14 @@ fun HistoryTab(paddingValues: PaddingValues) {
                 withContext(Dispatchers.Main) {
                     mediaPlayer?.release()
                     mediaPlayer = MediaPlayer().apply {
-                        setDataSource(item.recordingPath)
+                        setDataSource(recordingPath)
                         prepare()
                         start()
                         setOnCompletionListener {
                             playingItemId = null
                         }
                     }
-                    playingItemId = item.id
+                    playingItemId = itemId
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
@@ -1289,6 +1325,15 @@ fun HistoryTab(paddingValues: PaddingValues) {
                 }
             }
         }
+    }
+    
+    fun playRecording(item: ScreeningHistoryEntity) {
+        if (item.recordingPath.isNullOrEmpty()) return
+        playRecordingFromPath(item.recordingPath, item.id)
+    }
+    
+    fun playCallRecording(item: com.luisspamdetector.data.CallRecordingEntity) {
+        playRecordingFromPath(item.recordingPath, item.id)
     }
     
     fun stopPlaying() {
@@ -1313,60 +1358,436 @@ fun HistoryTab(paddingValues: PaddingValues) {
         }
     }
     
+    fun deleteCallRecording(item: com.luisspamdetector.data.CallRecordingEntity) {
+        scope.launch(Dispatchers.IO) {
+            // Delete recording file if exists
+            val file = File(item.recordingPath)
+            if (file.exists()) {
+                file.delete()
+            }
+            
+            db.callRecordingDao().delete(item.id)
+            callRecordings = db.callRecordingDao().getRecent(100)
+        }
+    }
+    
+    fun transcribeRecording(item: com.luisspamdetector.data.CallRecordingEntity) {
+        if (isTranscribing != null) {
+            Toast.makeText(context, "Ya hay una transcripción en curso", Toast.LENGTH_SHORT).show()
+            return
+        }
+        
+        isTranscribing = item.id
+        Toast.makeText(context, "Iniciando transcripción...", Toast.LENGTH_SHORT).show()
+        
+        scope.launch(Dispatchers.IO) {
+            try {
+                val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                val apiKey = prefs.getString("gemini_api_key", "") ?: ""
+                
+                if (apiKey.isBlank()) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Configura la API key de Gemini primero", Toast.LENGTH_SHORT).show()
+                        isTranscribing = null
+                    }
+                    return@launch
+                }
+                
+                val geminiService = com.luisspamdetector.api.GeminiApiService(apiKey)
+                val result = geminiService.transcribeAudio(item.recordingPath, item.phoneNumber)
+                
+                // Actualizar en base de datos
+                val updatedRecording = item.copy(
+                    transcription = result.transcription,
+                    summary = result.summary,
+                    isSpam = result.isSpam,
+                    spamConfidence = result.spamConfidence,
+                    transcriptionStatus = "COMPLETED"
+                )
+                db.callRecordingDao().update(updatedRecording)
+                
+                // Recargar lista
+                callRecordings = db.callRecordingDao().getRecent(100)
+                
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Transcripción completada", Toast.LENGTH_SHORT).show()
+                    isTranscribing = null
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                    isTranscribing = null
+                }
+            }
+        }
+    }
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(paddingValues)
-            .padding(16.dp)
     ) {
-        Text(
-            text = "Historial de Screening",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onBackground
-        )
+        // Tabs para Screening y Grabaciones
+        TabRow(selectedTabIndex = selectedTabIndex) {
+            Tab(
+                selected = selectedTabIndex == 0,
+                onClick = { selectedTabIndex = 0 },
+                text = { Text("Screening (${historyItems.size})") },
+                icon = { Icon(Icons.Default.Hearing, contentDescription = null, modifier = Modifier.size(18.dp)) }
+            )
+            Tab(
+                selected = selectedTabIndex == 1,
+                onClick = { selectedTabIndex = 1 },
+                text = { Text("Grabaciones (${callRecordings.size})") },
+                icon = { Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(18.dp)) }
+            )
+        }
         
-        Spacer(modifier = Modifier.height(8.dp))
-        
-        Text(
-            text = "${historyItems.size} llamadas analizadas",
-            fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
-        )
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        if (historyItems.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "No hay historial de llamadas",
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
-                )
+        when (selectedTabIndex) {
+            0 -> {
+                // Tab de Screening
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
+                ) {
+                    if (historyItems.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No hay historial de screening",
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(historyItems) { item ->
+                                ScreeningHistoryItem(
+                                    item = item,
+                                    isExpanded = expandedItemId == item.id,
+                                    isPlaying = playingItemId == item.id,
+                                    dateFormat = dateFormat,
+                                    onExpandToggle = {
+                                        expandedItemId = if (expandedItemId == item.id) null else item.id
+                                    },
+                                    onPlay = { playRecording(item) },
+                                    onStop = { stopPlaying() },
+                                    onDelete = { deleteItem(item) }
+                                )
+                            }
+                        }
+                    }
+                }
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(historyItems) { item ->
-                    ScreeningHistoryItem(
-                        item = item,
-                        isExpanded = expandedItemId == item.id,
-                        isPlaying = playingItemId == item.id,
-                        dateFormat = dateFormat,
-                        onExpandToggle = {
-                            expandedItemId = if (expandedItemId == item.id) null else item.id
-                        },
-                        onPlay = { playRecording(item) },
-                        onStop = { stopPlaying() },
-                        onDelete = { deleteItem(item) }
-                    )
+            1 -> {
+                // Tab de Grabaciones
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
+                ) {
+                    if (callRecordings.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    Icons.Default.Mic,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(64.dp),
+                                    tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f)
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    text = "No hay grabaciones",
+                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = "Las llamadas se grabarán automáticamente al contestar",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f)
+                                )
+                            }
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(callRecordings) { recording ->
+                                CallRecordingItem(
+                                    recording = recording,
+                                    isExpanded = expandedRecordingId == recording.id,
+                                    isPlaying = playingItemId == recording.id,
+                                    isTranscribing = isTranscribing == recording.id,
+                                    dateFormat = dateFormat,
+                                    onExpandToggle = {
+                                        expandedRecordingId = if (expandedRecordingId == recording.id) null else recording.id
+                                    },
+                                    onPlay = { playCallRecording(recording) },
+                                    onStop = { stopPlaying() },
+                                    onTranscribe = { transcribeRecording(recording) },
+                                    onDelete = { deleteCallRecording(recording) }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+fun CallRecordingItem(
+    recording: com.luisspamdetector.data.CallRecordingEntity,
+    isExpanded: Boolean,
+    isPlaying: Boolean,
+    isTranscribing: Boolean,
+    dateFormat: SimpleDateFormat,
+    onExpandToggle: () -> Unit,
+    onPlay: () -> Unit,
+    onStop: () -> Unit,
+    onTranscribe: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onExpandToggle() },
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (recording.isSpam) 
+                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+            else 
+                MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            // Header row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = recording.callerName ?: recording.phoneNumber,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    if (recording.callerName != null) {
+                        Text(
+                            text = recording.phoneNumber,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+                
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Estado de transcripción
+                    when (recording.transcriptionStatus) {
+                        "COMPLETED" -> Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = "Transcrito",
+                            tint = Color(0xFF4ecca3),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        "PROCESSING" -> CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                        else -> Icon(
+                            Icons.Default.Pending,
+                            contentDescription = "Pendiente",
+                            tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    
+                    // Spam indicator
+                    if (recording.isSpam) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = "Spam",
+                            tint = Color.Red,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    
+                    // Expand/collapse icon
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (isExpanded) "Colapsar" else "Expandir",
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            
+            // Date and file size
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = dateFormat.format(Date(recording.timestamp)),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+                
+                Text(
+                    text = formatFileSize(recording.recordingSize),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            
+            // Purpose if available
+            if (!recording.purpose.isNullOrEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Propósito: ${recording.purpose}",
+                    fontSize = 13.sp,
+                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                )
+            }
+            
+            // Expanded content
+            if (isExpanded) {
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f))
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                // Summary
+                if (!recording.summary.isNullOrBlank()) {
+                    Text(
+                        text = "Resumen:",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = recording.summary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+                
+                // Transcription
+                Text(
+                    text = "Transcripción:",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                
+                if (recording.transcriptionStatus == "COMPLETED" && !recording.transcription.isNullOrBlank()) {
+                    Text(
+                        text = recording.transcription,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                } else if (isTranscribing) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Transcribiendo con Gemini AI...",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                } else {
+                    Text(
+                        text = "Sin transcripción. Pulsa 'Analizar' para transcribir con IA.",
+                        fontSize = 14.sp,
+                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                // Action buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Play/Stop button
+                    OutlinedButton(
+                        onClick = { if (isPlaying) onStop() else onPlay() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            contentDescription = if (isPlaying) "Detener" else "Reproducir",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (isPlaying) "Parar" else "Oír")
+                    }
+                    
+                    // Transcribe button
+                    Button(
+                        onClick = onTranscribe,
+                        enabled = !isTranscribing && recording.transcriptionStatus != "COMPLETED",
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF4ecca3)
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Analytics,
+                            contentDescription = "Analizar",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Analizar")
+                    }
+                    
+                    // Delete button
+                    IconButton(
+                        onClick = onDelete
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Eliminar",
+                            tint = Color.Red
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+fun formatFileSize(bytes: Long): String {
+    return when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+        else -> String.format("%.1f MB", bytes / (1024.0 * 1024.0))
     }
 }
 
@@ -1485,7 +1906,7 @@ fun ScreeningHistoryItem(
             if (isExpanded) {
                 Spacer(modifier = Modifier.height(12.dp))
                 
-                Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f))
+                HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f))
                 
                 Spacer(modifier = Modifier.height(12.dp))
                 

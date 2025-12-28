@@ -13,6 +13,7 @@ import com.luisspamdetector.data.SpamCheckEntity
 import com.luisspamdetector.data.SpamDatabase
 import com.luisspamdetector.data.SpamRepository
 import com.luisspamdetector.data.ScreeningHistoryRepository
+import com.luisspamdetector.ui.CallControlActivity
 import com.luisspamdetector.ui.IncomingCallActivity
 import com.luisspamdetector.ui.ScreeningOverlayActivity
 import com.luisspamdetector.util.ContactsHelper
@@ -36,9 +37,17 @@ class LinphoneService : Service() {
         var isRunning = false
             private set
         
+        // Referencia al servicio para acceso externo
+        var instance: LinphoneService? = null
+            private set
+        
         // Acción broadcast para notificar cambio de estado de registro
         const val ACTION_REGISTRATION_STATE_CHANGED = "com.luisspamdetector.REGISTRATION_STATE_CHANGED"
         const val EXTRA_IS_REGISTERED = "is_registered"
+        
+        // Acciones para solicitar operaciones desde la UI
+        const val ACTION_REFRESH_REGISTRATION = "com.luisspamdetector.REFRESH_REGISTRATION"
+        const val ACTION_GET_REGISTRATION_STATE = "com.luisspamdetector.GET_REGISTRATION_STATE"
     }
 
     private var core: Core? = null
@@ -53,14 +62,28 @@ class LinphoneService : Service() {
     
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var currentScreeningCall: Call? = null
+    
+    // Datos para registrar la llamada en el Call Log del sistema
+    private var currentCallStartTime: Long = 0L
+    private var currentCallPhoneNumber: String? = null
+    private var currentCallContactName: String? = null
+    private var currentCallWasAnswered: Boolean = false
 
     // Receiver para acciones de la UI de screening
     private val callActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 ScreeningOverlayActivity.ACTION_ACCEPT_CALL -> {
-                    callScreeningService?.acceptCall()
+                    Logger.i(TAG, "Usuario aceptó la llamada manualmente")
+                    
+                    // Detener el screening silencioso
                     silentScreeningService?.stopScreening()
+                    callScreeningService?.acceptCall()
+                    
+                    // Cuando el usuario acepta, grabar AMBOS lados de la conversación
+                    currentScreeningCall?.let { call ->
+                        handleUserAcceptedCall(call)
+                    }
                 }
                 ScreeningOverlayActivity.ACTION_REJECT_CALL -> {
                     // Terminar la llamada usando todos los métodos disponibles
@@ -77,6 +100,65 @@ class LinphoneService : Service() {
                     }
                     currentScreeningCall = null
                 }
+                
+                // Acciones de CallControlActivity (modo softphone normal)
+                CallControlActivity.ACTION_ANSWER_CALL -> {
+                    Logger.i(TAG, "Contestando llamada desde CallControlActivity")
+                    currentScreeningCall?.let { call ->
+                        if (call.state == Call.State.IncomingReceived) {
+                            call.accept()
+                            Logger.i(TAG, "Llamada aceptada")
+                            // Iniciar grabación de ambos lados
+                            startFullCallRecording(call)
+                        }
+                    }
+                }
+                CallControlActivity.ACTION_HANGUP_CALL -> {
+                    Logger.i(TAG, "Terminando llamada desde CallControlActivity")
+                    currentScreeningCall?.let { call ->
+                        // Detener grabación si existe
+                        stopCurrentRecording(call)
+                        if (call.state != Call.State.End && call.state != Call.State.Released) {
+                            call.terminate()
+                            Logger.i(TAG, "Llamada terminada")
+                        }
+                    }
+                    currentScreeningCall = null
+                }
+                CallControlActivity.ACTION_TOGGLE_RECORDING -> {
+                    Logger.i(TAG, "Toggle grabación desde CallControlActivity")
+                    currentScreeningCall?.let { call ->
+                        toggleCallRecording(call)
+                    }
+                }
+                CallControlActivity.ACTION_TOGGLE_MUTE -> {
+                    Logger.i(TAG, "Toggle mute desde CallControlActivity")
+                    currentScreeningCall?.let { call ->
+                        call.microphoneMuted = !call.microphoneMuted
+                        Logger.i(TAG, "Micrófono muted: ${call.microphoneMuted}")
+                    }
+                }
+                CallControlActivity.ACTION_TOGGLE_SPEAKER -> {
+                    Logger.i(TAG, "Toggle speaker desde CallControlActivity")
+                    core?.let { c ->
+                        // Toggle speaker usando AudioDevice
+                        val currentDevice = c.outputAudioDevice
+                        val speakerDevice = c.audioDevices.find { 
+                            it.type == AudioDevice.Type.Speaker 
+                        }
+                        val earpieceDevice = c.audioDevices.find { 
+                            it.type == AudioDevice.Type.Earpiece 
+                        }
+                        
+                        if (currentDevice?.type == AudioDevice.Type.Speaker) {
+                            earpieceDevice?.let { c.outputAudioDevice = it }
+                            Logger.i(TAG, "Cambiado a auricular")
+                        } else {
+                            speakerDevice?.let { c.outputAudioDevice = it }
+                            Logger.i(TAG, "Cambiado a altavoz")
+                        }
+                    }
+                }
             }
         }
     }
@@ -86,6 +168,9 @@ class LinphoneService : Service() {
     override fun onCreate() {
         super.onCreate()
         Logger.d(TAG, "LinphoneService onCreate")
+        
+        // Guardar referencia para acceso externo
+        instance = this
 
         try {
             initializeComponents()
@@ -159,6 +244,12 @@ class LinphoneService : Service() {
         val filter = IntentFilter().apply {
             addAction(ScreeningOverlayActivity.ACTION_ACCEPT_CALL)
             addAction(ScreeningOverlayActivity.ACTION_REJECT_CALL)
+            // Acciones de CallControlActivity
+            addAction(CallControlActivity.ACTION_ANSWER_CALL)
+            addAction(CallControlActivity.ACTION_HANGUP_CALL)
+            addAction(CallControlActivity.ACTION_TOGGLE_RECORDING)
+            addAction(CallControlActivity.ACTION_TOGGLE_MUTE)
+            addAction(CallControlActivity.ACTION_TOGGLE_SPEAKER)
         }
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -303,17 +394,30 @@ class LinphoneService : Service() {
     ) {
         when (state) {
             RegistrationState.Ok -> {
-                Logger.i(TAG, "Cuenta registrada: ${account.params?.identityAddress?.asString()}")
+                Logger.i(TAG, "✓ Cuenta registrada: ${account.params?.identityAddress?.asString()}")
                 updateNotification("Conectado: ${account.params?.identityAddress?.username}")
                 broadcastRegistrationState(true)
             }
             RegistrationState.Failed -> {
-                Logger.e(TAG, "Registro fallido: $message")
-                updateNotification("Error de conexión")
+                Logger.e(TAG, "✗ Registro fallido: $message")
+                Logger.e(TAG, "  - Server: ${account.params?.serverAddress?.asString()}")
+                Logger.e(TAG, "  - Identity: ${account.params?.identityAddress?.asString()}")
+                Logger.e(TAG, "  - Transport: ${account.params?.serverAddress?.transport}")
+                
+                // Diagnóstico adicional
+                val errorInfo = account.errorInfo
+                if (errorInfo != null) {
+                    Logger.e(TAG, "  - Error Code: ${errorInfo.protocolCode}")
+                    Logger.e(TAG, "  - Error Phrase: ${errorInfo.phrase}")
+                    Logger.e(TAG, "  - Error Reason: ${errorInfo.reason}")
+                }
+                
+                updateNotification("Error: $message")
                 broadcastRegistrationState(false)
             }
             RegistrationState.Progress -> {
-                Logger.i(TAG, "Registrando...")
+                Logger.i(TAG, "⋯ Registrando...")
+                Logger.d(TAG, "  - Server: ${account.params?.serverAddress?.asString()}")
                 updateNotification("Conectando...")
                 broadcastRegistrationState(false)
             }
@@ -346,19 +450,54 @@ class LinphoneService : Service() {
             Call.State.IncomingEarlyMedia -> {
                 val phoneNumber = call.remoteAddress?.asStringUriOnly() ?: return
                 Logger.i(TAG, "Llamada entrante de: $phoneNumber")
+                
+                // Inicializar datos para el Call Log
+                currentCallStartTime = System.currentTimeMillis()
+                currentCallPhoneNumber = phoneNumber
+                currentCallWasAnswered = false
+                
                 handleIncomingCall(call, phoneNumber)
             }
-            Call.State.Connected -> {
+            Call.State.Connected,
+            Call.State.StreamsRunning -> {
                 Logger.i(TAG, "Llamada conectada")
+                currentCallWasAnswered = true
+                // Actualizar tiempo de inicio cuando se conecta realmente
+                if (state == Call.State.Connected) {
+                    currentCallStartTime = System.currentTimeMillis()
+                }
             }
             Call.State.End, 
             Call.State.Released -> {
                 Logger.i(TAG, "Llamada terminada")
+                
+                // Calcular duración y registrar en Call Log del sistema
+                currentCallPhoneNumber?.let { phoneNumber ->
+                    val duration = if (currentCallWasAnswered) {
+                        (System.currentTimeMillis() - currentCallStartTime) / 1000
+                    } else {
+                        0L
+                    }
+                    logIncomingCall(phoneNumber, currentCallWasAnswered, duration, currentCallContactName)
+                }
+                
+                // Limpiar datos de la llamada
                 currentScreeningCall = null
+                currentCallPhoneNumber = null
+                currentCallContactName = null
+                currentCallWasAnswered = false
             }
             Call.State.Error -> {
                 Logger.e(TAG, "Error en llamada: $message")
+                
+                // Registrar como llamada perdida
+                currentCallPhoneNumber?.let { phoneNumber ->
+                    logIncomingCall(phoneNumber, wasAnswered = false, duration = 0L, currentCallContactName)
+                }
+                
                 currentScreeningCall = null
+                currentCallPhoneNumber = null
+                currentCallContactName = null
             }
             else -> {
                 Logger.d(TAG, "Estado de llamada: $state")
@@ -367,6 +506,12 @@ class LinphoneService : Service() {
     }
 
     private fun handleIncomingCall(call: Call, phoneNumber: String) {
+        Logger.i(TAG, "=== handleIncomingCall iniciado ===")
+        Logger.i(TAG, "Número: $phoneNumber, Estado de llamada: ${call.state}")
+        
+        // Guardar la llamada actual
+        currentScreeningCall = call
+        
         serviceScope.launch {
             try {
                 // 1. Obtener configuración
@@ -374,28 +519,55 @@ class LinphoneService : Service() {
                 val callScreeningEnabled = prefs.getBoolean("call_screening_enabled", false)
                 val spamDetectionEnabled = prefs.getBoolean("spam_detection_enabled", true)
                 val testModeEnabled = prefs.getBoolean("test_mode_enabled", false)
+                
+                Logger.i(TAG, "Configuración: screening=$callScreeningEnabled, spam=$spamDetectionEnabled, test=$testModeEnabled")
 
-                // 2. Verificar si está en contactos (solo si NO está en modo prueba)
-                if (!testModeEnabled && contactsHelper.isNumberInContacts(phoneNumber)) {
-                    val name = contactsHelper.getContactName(phoneNumber)
-                    Logger.d(TAG, "Número en contactos: $name - ignorando (modo prueba: desactivado)")
-                    return@launch
+                // 2. Verificar si está en contactos
+                var isContact = false
+                var contactName: String? = null
+                if (!testModeEnabled) {
+                    try {
+                        if (contactsHelper.isNumberInContacts(phoneNumber)) {
+                            contactName = contactsHelper.getContactName(phoneNumber)
+                            isContact = true
+                            Logger.d(TAG, "Número en contactos: $contactName")
+                        }
+                    } catch (e: Exception) {
+                        Logger.w(TAG, "Error verificando contactos", e)
+                    }
                 }
+                
+                // Guardar nombre del contacto para el Call Log
+                currentCallContactName = contactName
 
                 if (testModeEnabled) {
                     Logger.i(TAG, "MODO PRUEBA: Procesando llamada de $phoneNumber")
                 }
 
                 // 3. Procesar según configuración
-
                 when {
+                    // Si es un contacto conocido, mostrar pantalla de llamada normal
+                    isContact -> {
+                        Logger.i(TAG, ">>> Contacto conocido, mostrando pantalla de llamada")
+                        showIncomingCallScreen(call, phoneNumber, contactName, isSpam = false)
+                    }
+                    // Call screening automático (auto-descuelga)
                     callScreeningEnabled -> {
-                        // Modo call screening: auto-contestar y filtrar
+                        Logger.i(TAG, ">>> Iniciando call screening para $phoneNumber")
                         handleCallScreening(call, phoneNumber)
                     }
+                    // Solo detección de spam (muestra alerta pero no auto-descuelga)
                     spamDetectionEnabled -> {
-                        // Modo solo detección de spam
+                        Logger.i(TAG, ">>> Iniciando detección de spam para $phoneNumber")
+                        // Mostrar pantalla de llamada mientras se verifica spam
+                        showIncomingCallScreen(call, phoneNumber, null, isSpam = false)
+                        // Verificar spam en paralelo
                         handleSpamDetection(phoneNumber)
+                    }
+                    // Ningún modo activo - funcionar como softphone normal
+                    else -> {
+                        Logger.i(TAG, ">>> Modo softphone normal")
+                        showIncomingCallScreen(call, phoneNumber, null, isSpam = false)
                     }
                 }
 
@@ -403,6 +575,21 @@ class LinphoneService : Service() {
                 Logger.e(TAG, "Error al procesar llamada entrante", e)
             }
         }
+    }
+    
+    /**
+     * Muestra la pantalla de llamada entrante para que el usuario pueda aceptar/rechazar
+     */
+    private fun showIncomingCallScreen(call: Call, phoneNumber: String, contactName: String?, isSpam: Boolean) {
+        Logger.i(TAG, "Mostrando pantalla de llamada entrante: $phoneNumber (contacto: $contactName, spam: $isSpam)")
+        
+        val intent = Intent(this, CallControlActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(CallControlActivity.EXTRA_PHONE_NUMBER, phoneNumber)
+            putExtra(CallControlActivity.EXTRA_DISPLAY_NAME, contactName)
+            putExtra(CallControlActivity.EXTRA_IS_SPAM, isSpam)
+        }
+        startActivity(intent)
     }
 
     private suspend fun handleSpamDetection(phoneNumber: String) {
@@ -445,63 +632,119 @@ class LinphoneService : Service() {
     }
 
     private fun handleCallScreening(call: Call, phoneNumber: String) {
+        Logger.i(TAG, "=== handleCallScreening iniciado ===")
+        Logger.i(TAG, "Número: $phoneNumber, Estado: ${call.state}")
+        
         currentScreeningCall = call
         val recordingPath = getCallRecordingPath(phoneNumber)
 
         try {
-            // Configurar parámetros para grabar la llamada
+            // Configurar parámetros para la llamada
             val callParams = core?.createCallParams(call)
-            callParams?.apply {
+            if (callParams == null) {
+                Logger.e(TAG, "Error: No se pudieron crear CallParams")
+                return
+            }
+            
+            callParams.apply {
                 isAudioEnabled = true
                 isVideoEnabled = false
-                // Configurar archivo de grabación - IMPORTANTE: debe ser .wav para Linphone
+                // Configurar archivo de grabación para después
+                // NO iniciamos grabación aquí, la iniciaremos después del TTS
                 recordFile = recordingPath
             }
             
-            // También configurar en el Core para asegurar que se grabe
-            core?.recordFile = recordingPath
-            Logger.i(TAG, "Archivo de grabación configurado: $recordingPath")
+            Logger.i(TAG, "CallParams configurados, intentando aceptar llamada...")
             
-            call.acceptWithParams(callParams)
-            Logger.d(TAG, "Llamada auto-contestada para screening silencioso")
+            // Aceptar la llamada
+            val result = call.acceptWithParams(callParams)
+            Logger.i(TAG, "Resultado de acceptWithParams: $result")
+            Logger.i(TAG, "Llamada auto-contestada para screening silencioso")
 
-            // Configurar audio y empezar grabación cuando la llamada esté activa
+            // Configurar audio y preparar grabación
             serviceScope.launch {
                 // Esperar a que la llamada esté en estado StreamsRunning
                 var attempts = 0
-                while (call.state != Call.State.StreamsRunning && attempts < 20) {
+                while (call.state != Call.State.StreamsRunning && attempts < 30) {
                     delay(100)
                     attempts++
                 }
                 
-                Logger.i(TAG, "Estado de llamada después de espera: ${call.state}")
+                Logger.i(TAG, "Estado de llamada después de espera ($attempts intentos): ${call.state}")
                 
-                // Configurar audio silencioso (sin afectar la grabación)
+                // Configurar audio silencioso para el usuario
                 configureAudioForSilentScreening(call)
                 
-                // Iniciar grabación de la llamada - DEBE estar en StreamsRunning
-                if (call.state == Call.State.StreamsRunning) {
-                    call.startRecording()
-                    Logger.i(TAG, "✓ Grabación de llamada iniciada: $recordingPath")
-                    Logger.i(TAG, "  - isRecording: ${call.params?.isRecording}")
-                    Logger.i(TAG, "  - recordFile: ${call.params?.recordFile}")
-                } else {
-                    Logger.w(TAG, "Llamada no está en StreamsRunning, intentando grabar de todos modos...")
-                    call.startRecording()
-                }
+                // IMPORTANTE: NO iniciamos la grabación aquí
+                // La grabación se iniciará cuando termine el TTS en SilentCallScreeningService
+                // Esto es para grabar solo la respuesta del interlocutor, no el TTS
+                Logger.i(TAG, "Audio configurado. Grabación se iniciará después del TTS.")
+                
+                // Guardar la ruta de grabación para usarla después
+                core?.recordFile = recordingPath
             }
 
             // Mostrar overlay de screening (modo silencioso)
             showScreeningOverlay(phoneNumber)
 
-            // Iniciar proceso de screening SILENCIOSO (usa LinphonePlayer en lugar de TTS/altavoz)
+            // Iniciar proceso de screening SILENCIOSO
             serviceScope.launch {
-                delay(800) // Esperar a que se establezca la llamada
+                delay(500) // Esperar a que se establezca la llamada
+                Logger.i(TAG, "Iniciando SilentCallScreeningService...")
                 silentScreeningService?.startScreening(call, phoneNumber)
             }
 
         } catch (e: Exception) {
             Logger.e(TAG, "Error al auto-contestar llamada", e)
+        }
+    }
+    
+    /**
+     * Maneja cuando el usuario acepta manualmente la llamada durante el screening.
+     * En este caso, grabamos AMBOS lados de la conversación (micrófono + interlocutor).
+     */
+    private fun handleUserAcceptedCall(call: Call) {
+        Logger.i(TAG, "=== Usuario aceptó llamada, iniciando grabación de ambos lados ===")
+        
+        val phoneNumber = call.remoteAddress?.asStringUriOnly() ?: "unknown"
+        val recordingPath = getCallRecordingPath(phoneNumber).replace("screening_", "call_")
+        
+        try {
+            // Desmutear el micrófono para que se grabe nuestra voz también
+            call.microphoneMuted = false
+            Logger.i(TAG, "Micrófono desmuteado para grabación completa")
+            
+            // Restaurar el volumen de la llamada para que el usuario escuche
+            try {
+                val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+                val maxVolume = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_VOICE_CALL)
+                audioManager.setStreamVolume(
+                    android.media.AudioManager.STREAM_VOICE_CALL,
+                    maxVolume / 2, // Volumen medio
+                    0
+                )
+                Logger.i(TAG, "Volumen de llamada restaurado")
+            } catch (e: Exception) {
+                Logger.w(TAG, "Error restaurando volumen", e)
+            }
+            
+            // Configurar y comenzar grabación de ambos lados
+            val callParams = core?.createCallParams(call)
+            callParams?.recordFile = recordingPath
+            
+            // Actualizar parámetros de la llamada
+            call.update(callParams)
+            
+            // Iniciar grabación
+            serviceScope.launch {
+                delay(200) // Pequeña espera para que se apliquen los cambios
+                call.startRecording()
+                Logger.i(TAG, "✓ Grabación de llamada completa iniciada: $recordingPath")
+                Logger.i(TAG, "  - Grabando: micrófono + interlocutor")
+            }
+            
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error iniciando grabación de llamada aceptada", e)
         }
     }
     
@@ -604,6 +847,209 @@ class LinphoneService : Service() {
             call.stopRecording()
             Logger.i(TAG, "Grabación de llamada detenida")
         }
+    }
+
+    /**
+     * Inicia grabación completa de la llamada (ambos lados del audio)
+     * Para cuando el usuario contesta manualmente desde la UI de softphone
+     */
+    private fun startFullCallRecording(call: Call) {
+        try {
+            val remoteAddress = call.remoteAddress?.asStringUriOnly() ?: "unknown"
+            val recordingPath = getCallRecordingPath(remoteAddress)
+            
+            Logger.i(TAG, "Iniciando grabación completa de llamada: $recordingPath")
+            
+            // Configurar params para grabación
+            val callParams = core?.createCallParams(call)
+            callParams?.recordFile = recordingPath
+            
+            // Asegurar que el micrófono NO esté muted para grabar ambos lados
+            call.microphoneMuted = false
+            
+            // Actualizar parámetros
+            call.update(callParams)
+            
+            // Iniciar grabación con pequeña espera
+            serviceScope.launch {
+                delay(200)
+                call.startRecording()
+                Logger.i(TAG, "✓ Grabación completa iniciada")
+            }
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error iniciando grabación completa", e)
+        }
+    }
+    
+    /**
+     * Detiene la grabación de una llamada específica
+     */
+    private fun stopCurrentRecording(call: Call) {
+        try {
+            val recordingPath = call.params?.recordFile
+            if (recordingPath != null) {
+                call.stopRecording()
+                Logger.i(TAG, "Grabación detenida: $recordingPath")
+                
+                // Guardar en base de datos
+                val phoneNumber = call.remoteAddress?.asStringUriOnly() ?: "unknown"
+                serviceScope.launch {
+                    saveCallRecordingToDatabase(phoneNumber, recordingPath)
+                }
+            }
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error deteniendo grabación", e)
+        }
+    }
+    
+    /**
+     * Toggle grabación (iniciar/detener)
+     */
+    private fun toggleCallRecording(call: Call) {
+        val isRecording = call.params?.recordFile != null && 
+                          java.io.File(call.params?.recordFile ?: "").exists()
+        
+        if (call.isRecording) {
+            call.stopRecording()
+            Logger.i(TAG, "Grabación pausada")
+        } else {
+            val recordingPath = call.params?.recordFile
+            if (recordingPath != null) {
+                call.startRecording()
+                Logger.i(TAG, "Grabación reanudada")
+            } else {
+                // No hay grabación configurada, iniciar una nueva
+                startFullCallRecording(call)
+            }
+        }
+    }
+    
+    /**
+     * Guarda la grabación en la base de datos
+     */
+    private suspend fun saveCallRecordingToDatabase(phoneNumber: String, recordingPath: String) {
+        try {
+            val file = java.io.File(recordingPath)
+            if (file.exists()) {
+                val database = SpamDatabase.getDatabase(this@LinphoneService)
+                // Limpiar el número antes de guardar
+                val cleanNumber = extractPhoneNumber(phoneNumber)
+                val recording = com.luisspamdetector.data.CallRecordingEntity(
+                    phoneNumber = cleanNumber,
+                    displayName = null,
+                    isIncoming = true,
+                    duration = 0L, // Se puede calcular del archivo WAV
+                    recordingPath = recordingPath,
+                    recordingSize = file.length(),
+                    recordingFormat = "wav",
+                    transcription = null,
+                    summary = null,
+                    callerName = null,
+                    purpose = null,
+                    keyPoints = null,
+                    isSpam = false,
+                    spamConfidence = 0.0,
+                    urgency = "LOW",
+                    sentiment = "NEUTRAL",
+                    wasAnswered = true,
+                    wasRecordedBothSides = true,
+                    transcriptionStatus = "PENDING",
+                    timestamp = System.currentTimeMillis()
+                )
+                database.callRecordingDao().insert(recording)
+                Logger.i(TAG, "Grabación guardada en base de datos: $cleanNumber -> $recordingPath")
+            }
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error guardando grabación en base de datos", e)
+        }
+    }
+    
+    /**
+     * Extrae solo el número de teléfono de una URI SIP
+     * Ejemplos:
+     * - "sip:913688160@161.22.43.99" -> "913688160"
+     * - "sip:+34913688160@domain.com" -> "+34913688160"
+     * - "913688160" -> "913688160"
+     */
+    private fun extractPhoneNumber(sipUri: String): String {
+        var number = sipUri
+        
+        // Quitar prefijo "sip:"
+        if (number.startsWith("sip:", ignoreCase = true)) {
+            number = number.substring(4)
+        }
+        
+        // Quitar todo después de "@"
+        val atIndex = number.indexOf('@')
+        if (atIndex > 0) {
+            number = number.substring(0, atIndex)
+        }
+        
+        // Quitar parámetros después de ";"
+        val semicolonIndex = number.indexOf(';')
+        if (semicolonIndex > 0) {
+            number = number.substring(0, semicolonIndex)
+        }
+        
+        return number.trim()
+    }
+    
+    /**
+     * Registra la llamada en el Call Log del sistema Android para que aparezca
+     * en el historial de llamadas del teléfono y se pueda rellamar
+     */
+    private fun addCallToSystemCallLog(
+        phoneNumber: String,
+        callType: Int, // CallLog.Calls.INCOMING_TYPE, OUTGOING_TYPE, MISSED_TYPE
+        duration: Long, // duración en segundos
+        contactName: String? = null
+    ) {
+        try {
+            // Verificar permiso
+            if (checkSelfPermission(android.Manifest.permission.WRITE_CALL_LOG) 
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                Logger.w(TAG, "No hay permiso WRITE_CALL_LOG, no se puede registrar la llamada")
+                return
+            }
+            
+            // Extraer solo el número, sin sip: ni @dominio
+            val cleanNumber = extractPhoneNumber(phoneNumber)
+            Logger.d(TAG, "Número limpio para Call Log: $cleanNumber (original: $phoneNumber)")
+            
+            val values = android.content.ContentValues().apply {
+                put(android.provider.CallLog.Calls.NUMBER, cleanNumber)
+                put(android.provider.CallLog.Calls.TYPE, callType)
+                put(android.provider.CallLog.Calls.DATE, System.currentTimeMillis())
+                put(android.provider.CallLog.Calls.DURATION, duration)
+                put(android.provider.CallLog.Calls.NEW, 1)
+                
+                // Agregar nombre del contacto si está disponible
+                if (contactName != null) {
+                    put(android.provider.CallLog.Calls.CACHED_NAME, contactName)
+                }
+                
+                // Indicar que es una llamada VoIP
+                put(android.provider.CallLog.Calls.PHONE_ACCOUNT_ID, "linphone_sip")
+            }
+            
+            contentResolver.insert(android.provider.CallLog.Calls.CONTENT_URI, values)
+            Logger.i(TAG, "Llamada registrada en Call Log del sistema: $cleanNumber (tipo: $callType, duración: ${duration}s)")
+            
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error registrando llamada en Call Log del sistema", e)
+        }
+    }
+    
+    /**
+     * Registra una llamada entrante en el Call Log
+     */
+    private fun logIncomingCall(phoneNumber: String, wasAnswered: Boolean, duration: Long, contactName: String? = null) {
+        val callType = if (wasAnswered) {
+            android.provider.CallLog.Calls.INCOMING_TYPE
+        } else {
+            android.provider.CallLog.Calls.MISSED_TYPE
+        }
+        addCallToSystemCallLog(phoneNumber, callType, duration, contactName)
     }
 
     private fun handleScreeningCompleted(name: String?, purpose: String?, phoneNumber: String) {
@@ -919,6 +1365,7 @@ class LinphoneService : Service() {
 
     /**
      * Crea y registra una cuenta SIP usando la API moderna de Account
+     * IMPORTANTE: Limpia cuentas anteriores para evitar doble registro
      */
     fun createAndRegisterAccount(
         username: String,
@@ -929,6 +1376,13 @@ class LinphoneService : Service() {
         return try {
             val core = this.core ?: return false
             val factory = Factory.instance()
+
+            // IMPORTANTE: Limpiar cuentas anteriores para evitar doble registro
+            val existingAccounts = core.accountList.size
+            if (existingAccounts > 0) {
+                Logger.i(TAG, "Limpiando $existingAccounts cuenta(s) existente(s) antes de registrar nueva")
+                clearAccounts()
+            }
 
             // Convertir protocolo a TransportType
             val transport = when (protocol.uppercase()) {
@@ -952,11 +1406,19 @@ class LinphoneService : Service() {
 
             // Configurar identidad (usar solo el host, sin puerto)
             val identity = factory.createAddress("sip:$username@$host")
+            if (identity == null) {
+                Logger.e(TAG, "Error creando dirección de identidad")
+                return false
+            }
             accountParams.identityAddress = identity
 
             // Configurar servidor con puerto explícito
             val serverAddress = factory.createAddress("sip:$host:$port")
-            serverAddress?.transport = transport
+            if (serverAddress == null) {
+                Logger.e(TAG, "Error creando dirección del servidor")
+                return false
+            }
+            serverAddress.transport = transport
             accountParams.serverAddress = serverAddress
 
             // Habilitar registro
@@ -964,15 +1426,24 @@ class LinphoneService : Service() {
             accountParams.publishExpires = 120
             
             // Configurar timeout de registro (en segundos)
-            accountParams.expires = 600
+            accountParams.expires = 300
+            
+            // Configurar NAT policy para la cuenta
+            val natPolicy = core.createNatPolicy()
+            natPolicy.isStunEnabled = true
+            natPolicy.stunServer = "stun.linphone.org"
+            natPolicy.isIceEnabled = true
+            natPolicy.isTurnEnabled = false
+            accountParams.natPolicy = natPolicy
+            Logger.d(TAG, "NAT Policy configurada con STUN: stun.linphone.org, ICE habilitado")
 
-            // Crear AuthInfo
+            // Crear AuthInfo con realm vacío para auto-detectar
             val authInfo = factory.createAuthInfo(
                 username,   // username
-                null,       // userid
+                null,       // userid (null para usar username)
                 password,   // password
                 null,       // ha1
-                null,       // realm
+                "",         // realm vacío para auto-detectar
                 host        // domain (solo el host, sin puerto)
             )
 
@@ -987,6 +1458,9 @@ class LinphoneService : Service() {
             core.defaultAccount = account
 
             Logger.i(TAG, "Cuenta creada y registrando: $username@$host:$port con protocolo $protocol")
+            Logger.d(TAG, "  - Identity: ${identity.asString()}")
+            Logger.d(TAG, "  - Server: ${serverAddress.asString()}")
+            Logger.d(TAG, "  - Transport: $transport")
             true
 
         } catch (e: Exception) {
@@ -1002,6 +1476,48 @@ class LinphoneService : Service() {
         core?.clearAccounts()
         core?.clearAllAuthInfo()
         Logger.i(TAG, "Todas las cuentas eliminadas")
+        broadcastRegistrationState(false)
+    }
+
+    /**
+     * Refresca el registro SIP de la cuenta actual
+     */
+    fun refreshRegistration() {
+        try {
+            val account = core?.defaultAccount
+            if (account != null) {
+                Logger.i(TAG, "Refrescando registro SIP...")
+                account.refreshRegister()
+            } else {
+                Logger.w(TAG, "No hay cuenta SIP configurada para refrescar")
+                broadcastRegistrationState(false)
+            }
+        } catch (e: Exception) {
+            Logger.e(TAG, "Error al refrescar registro", e)
+        }
+    }
+
+    /**
+     * Obtiene el estado actual del registro SIP
+     */
+    fun getRegistrationState(): RegistrationState {
+        return core?.defaultAccount?.state ?: RegistrationState.None
+    }
+
+    /**
+     * Devuelve true si la cuenta SIP está registrada correctamente
+     */
+    fun isRegistered(): Boolean {
+        return core?.defaultAccount?.state == RegistrationState.Ok
+    }
+
+    /**
+     * Fuerza el reenvío del estado de registro actual via broadcast
+     */
+    fun broadcastCurrentRegistrationState() {
+        val isRegistered = isRegistered()
+        broadcastRegistrationState(isRegistered)
+        Logger.d(TAG, "Estado de registro actual enviado: $isRegistered")
     }
 
     /**
@@ -1040,6 +1556,137 @@ class LinphoneService : Service() {
         }
     }
 
+    // endregion
+    
+    // region Métodos públicos para control de llamadas desde UI
+    
+    /**
+     * Contesta la llamada entrante actual e inicia grabación automática
+     */
+    fun answerCurrentCall() {
+        Logger.i(TAG, "answerCurrentCall() llamado")
+        currentScreeningCall?.let { call ->
+            if (call.state == Call.State.IncomingReceived || 
+                call.state == Call.State.IncomingEarlyMedia) {
+                try {
+                    // Preparar parámetros con configuración de grabación
+                    val phoneNumber = call.remoteAddress?.asStringUriOnly() ?: "unknown"
+                    val recordingPath = getCallRecordingPath(phoneNumber)
+                    
+                    val callParams = core?.createCallParams(call)
+                    callParams?.apply {
+                        isAudioEnabled = true
+                        isVideoEnabled = false
+                        recordFile = recordingPath
+                    }
+                    
+                    Logger.i(TAG, "Aceptando llamada con grabación automática: $recordingPath")
+                    
+                    // Aceptar la llamada con los parámetros
+                    val result = call.acceptWithParams(callParams)
+                    Logger.i(TAG, "Resultado de acceptWithParams: $result")
+                    
+                    // Iniciar grabación automáticamente después de un pequeño delay
+                    serviceScope.launch {
+                        delay(500) // Esperar a que se establezca el audio
+                        try {
+                            call.startRecording()
+                            Logger.i(TAG, "✓ Grabación automática iniciada")
+                        } catch (e: Exception) {
+                            Logger.e(TAG, "Error iniciando grabación automática", e)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Logger.e(TAG, "Error aceptando llamada", e)
+                }
+            } else {
+                Logger.w(TAG, "La llamada no está en estado IncomingReceived: ${call.state}")
+            }
+        } ?: run {
+            Logger.e(TAG, "No hay llamada activa para contestar")
+        }
+    }
+    
+    /**
+     * Cuelga la llamada actual
+     */
+    fun hangupCurrentCall() {
+        Logger.i(TAG, "hangupCurrentCall() llamado")
+        currentScreeningCall?.let { call ->
+            try {
+                // Detener grabación si existe
+                stopCurrentRecording(call)
+                
+                if (call.state != Call.State.End && call.state != Call.State.Released) {
+                    call.terminate()
+                    Logger.i(TAG, "Llamada terminada exitosamente")
+                } else {
+                    Logger.d(TAG, "La llamada ya estaba terminada: ${call.state}")
+                }
+            } catch (e: Exception) {
+                Logger.e(TAG, "Error terminando llamada", e)
+            }
+            currentScreeningCall = null
+        } ?: run {
+            Logger.w(TAG, "No hay llamada activa para colgar")
+        }
+    }
+    
+    /**
+     * Alterna la grabación de la llamada actual
+     */
+    fun toggleCurrentCallRecording() {
+        Logger.i(TAG, "toggleCurrentCallRecording() llamado")
+        currentScreeningCall?.let { call ->
+            toggleCallRecording(call)
+        } ?: run {
+            Logger.w(TAG, "No hay llamada activa para toggle recording")
+        }
+    }
+    
+    /**
+     * Alterna el mute del micrófono de la llamada actual
+     */
+    fun toggleCurrentCallMute() {
+        Logger.i(TAG, "toggleCurrentCallMute() llamado")
+        currentScreeningCall?.let { call ->
+            call.microphoneMuted = !call.microphoneMuted
+            Logger.i(TAG, "Micrófono muted: ${call.microphoneMuted}")
+        } ?: run {
+            Logger.w(TAG, "No hay llamada activa para toggle mute")
+        }
+    }
+    
+    /**
+     * Alterna el altavoz
+     */
+    fun toggleSpeaker() {
+        Logger.i(TAG, "toggleSpeaker() llamado")
+        core?.let { c ->
+            val currentDevice = c.outputAudioDevice
+            val speakerDevice = c.audioDevices.find { 
+                it.type == AudioDevice.Type.Speaker 
+            }
+            val earpieceDevice = c.audioDevices.find { 
+                it.type == AudioDevice.Type.Earpiece 
+            }
+            
+            if (currentDevice?.type == AudioDevice.Type.Speaker) {
+                earpieceDevice?.let { 
+                    c.outputAudioDevice = it 
+                    Logger.i(TAG, "Cambiado a auricular")
+                }
+            } else {
+                speakerDevice?.let { 
+                    c.outputAudioDevice = it 
+                    Logger.i(TAG, "Cambiado a altavoz")
+                }
+            }
+        } ?: run {
+            Logger.w(TAG, "Core no disponible para toggle speaker")
+        }
+    }
+    
     // endregion
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -1082,5 +1729,8 @@ class LinphoneService : Service() {
         core?.stop()
         core = null
         coreListener = null
+        
+        // Limpiar referencia de instancia
+        instance = null
     }
 }
